@@ -12,268 +12,111 @@ Use this recurring scenario: **an order application** accepts orders, stores the
 
 Examples are independent teaching snippets, not one combined application. Imports and domain implementations are omitted unless important. Use the Boot-managed dependency set for your selected release. Web, validation, Actuator, database and test examples require their corresponding dependencies; annotations alone do not install infrastructure. Where Boot 3 and 4 differ, examples identify the boundary instead of assuming interchangeable imports.
 
-## Start here: learn Boot by running one small application
+## Start with your own applications: make the abstractions concrete
 
-Read the interview sections **after** this walkthrough. Your first goal is not to memorize annotations; it is to observe: "I sent this request, these objects handled it, and this setting changed the result."
+Use your existing projects to connect the interview concepts to familiar code.
 
-This walkthrough is one coherent application, unlike the independent snippets later. It creates an order and reads it back from memory. There is intentionally no database, authentication, broker or external API yet. The code below is a recipe to run in a separate generated project, not an application already created or executed in this notes repository.
+Source snapshot inspected: November 1, 2026. Paths below are relative to each project root. These are source-backed explanations, not a claim that the applications were launched or their external services verified.
 
-### Step 1: generate the project rather than assembling dependencies manually
+| Your project | What it actually uses | Best learning role |
+| --- | --- | --- |
+| `C:\Users\guptanitesh\Downloads\dairy-order-processor` | Spring Boot 3.5.16, Java 21; `spring-boot-starter`, not the web starter | Primary example for Boot startup, scanning, bean wiring, properties and command-line execution |
+| `C:\Users\guptanitesh\Downloads\quiz-generator` | Quarkus 3.39.4, Java 21; backend in `backend` | Compare HTTP entry points and dependency injection without treating CDI/Jakarta REST as Spring |
 
-Open [Spring Initializr](https://start.spring.io/) and select Maven, Java, JAR packaging, and a stable Boot release offered by the generator. Choose Java 21 if supported by that release and installed locally; otherwise choose a supported Java version you have installed.
+### 1. Trace what starts the dairy application
 
-Use group `example`, artifact `orders`, and package name `example.orders`. Add **Spring Web**, **Validation**, and **Spring Boot Actuator**. Download and extract the project to a separate folder. Do not add Security or a database dependency for this first exercise.
-
-The generator supplies a compatible dependency set and Maven wrapper. Keep its `pom.xml`; do not paste dependencies from a tutorial targeting another Boot generation.
-
-| Generated item | What you use it for |
-| --- | --- |
-| `pom.xml` | Declares dependencies and build plugins |
-| `mvnw.cmd` | Runs Maven on Windows without a separate Maven installation |
-| `src\main\java\example\orders` | Application Java files |
-| `src\main\resources\application.properties` | Application settings |
-| `src\test\java` | Tests, including the generated context test |
-
-Check `java -version` and `.\mvnw.cmd -version` from the extracted project folder. The Maven wrapper may download Maven/dependencies on first use. Maven must use a Java version compatible with the generated project.
-
-### Step 2: define what an order looks like
-
-Create `src\main\java\example\orders\Order.java`:
+Open `src\main\java\com\example\dairyorderprocessor\DairyOrderProcessorApplication.java`.
 
 ```java
-package example.orders;
-
-import java.util.UUID;
-
-public record Order(UUID id, String product, int quantity, String status) { }
-```
-
-This is ordinary Java data. It is **not** a Spring bean. One `Order` will be created for each accepted order, rather than asking Spring to create it as a singleton.
-
-### Step 3: put the behavior in a service
-
-Create `src\main\java\example\orders\OrderService.java`:
-
-```java
-package example.orders;
-
-import java.util.Optional;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-
-@Service
-public class OrderService {
-    private final ConcurrentHashMap<UUID, Order> orders = new ConcurrentHashMap<>();
-    private final String initialStatus;
-
-    public OrderService(@Value("${orders.initial-status:accepted}") String initialStatus) {
-        this.initialStatus = initialStatus;
-    }
-
-    public Order create(String product, int quantity) {
-        Order order = new Order(UUID.randomUUID(), product, quantity, initialStatus);
-        orders.put(order.id(), order);
-        return order;
-    }
-
-    public Optional<Order> find(UUID id) {
-        return Optional.ofNullable(orders.get(id));
-    }
-}
-```
-
-Spring discovers `@Service` and creates this bean. Its single constructor receives a configuration value; the default is `accepted`. The concurrent map supports concurrent basic reads/writes in this toy application; it is not durable storage or a substitute for a database transaction.
-
-### Step 4: expose two HTTP operations
-
-Create `src\main\java\example\orders\OrderController.java`:
-
-```java
-package example.orders;
-
-import java.net.URI;
-import java.util.UUID;
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.NotBlank;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-
-@RestController
-@RequestMapping("/orders")
-public class OrderController {
-    private final OrderService service;
-
-    public OrderController(OrderService service) {
-        this.service = service;
-    }
-
-    public record CreateOrderRequest(
-            @NotBlank String product,
-            @Min(1) int quantity) { }
-
-    @PostMapping
-    public ResponseEntity<Order> create(@Valid @RequestBody CreateOrderRequest request) {
-        Order order = service.create(request.product(), request.quantity());
-        return ResponseEntity.created(URI.create("/orders/" + order.id())).body(order);
-    }
-
-    @GetMapping("/{id}")
-    public ResponseEntity<Order> find(@PathVariable("id") UUID id) {
-        return ResponseEntity.of(service.find(id));
-    }
-}
-```
-
-The controller translates HTTP input into a service call. Constructor injection connects it to the managed service. `@Valid` triggers validation of the input record; `ResponseEntity` defines status, headers and body. `ResponseEntity.of` returns 200 when the order exists and 404 when it does not.
-
-Keep the generated `OrdersApplication` main class in `example.orders`:
-
-```java
-package example.orders;
-
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-
 @SpringBootApplication
-public class OrdersApplication {
+public class DairyOrderProcessorApplication {
     public static void main(String[] args) {
-        SpringApplication.run(OrdersApplication.class, args);
+        SpringApplication.run(DairyOrderProcessorApplication.class, args);
     }
 }
 ```
 
-These four files all share the same package and are intended to work together.
+`main` is ordinary Java. `SpringApplication.run` starts the Boot application and creates its Spring application context. `@SpringBootApplication` supplies configuration, auto-configuration and component scanning. Because this class is in `com.example.dairyorderprocessor`, its default component scan covers subpackages such as `config`, `pipeline` and `extraction`.
 
-### Step 5: run it and observe an actual request
+**Concrete question:** who creates `PipelineRunner`? You do not call `new PipelineRunner(...)` here. Spring discovers its `@Component` annotation and supplies the dependencies needed to construct it.
 
-In the generated project folder:
+This application is a command-line pipeline, not an MVC server: its POM has no web starter. Boot does not mean "start Tomcat" or "expose a REST API" in every project.
 
-```powershell
-.\mvnw.cmd spring-boot:run
-```
+### 2. Separate startup wiring from business execution
 
-Wait for the startup log indicating the application has started. Leave that terminal running and open a second PowerShell terminal:
+Read these files under `src\main\java\com\example\dairyorderprocessor` in this order:
 
-```powershell
-$order = Invoke-RestMethod -Method Post `
-    -Uri "http://localhost:8080/orders" `
-    -ContentType "application/json" `
-    -Body '{"product":"notebook","quantity":2}'
-$order
-Invoke-RestMethod -Uri "http://localhost:8080/orders/$($order.id)"
-```
+| File | What to notice |
+| --- | --- |
+| `pipeline\PipelineRunner.java` | `@Component`, a constructor accepting `OrderPipeline`, and `implements CommandLineRunner` |
+| `pipeline\OrderPipeline.java` | Constructor receives collaborators; `run()` coordinates the actual work |
+| `config\AppConfig.java` | `@Bean` methods register objects that scanning alone would not create |
+| `config\DairyProperties.java` | `@ConfigurationProperties(prefix = "dairy")` represents external settings |
 
-Creation returns HTTP **201**, a `Location` header, and a body resembling:
+After the context is refreshed, Boot invokes `PipelineRunner.run(String... args)`. That method calls `pipeline.run()`, logs completion, and logs/rethrows failures. It is not an HTTP handler, and it is not Spring constructing a new pipeline for every stage.
 
-```json
-{
-  "id": "generated-UUID-here",
-  "product": "notebook",
-  "quantity": 2,
-  "status": "accepted"
-}
-```
-
-The actual ID is a UUID, not the placeholder above. Use it to retrieve the same order; GET returns **200**. `Invoke-RestMethod` prints parsed response data rather than all response headers; use `Invoke-WebRequest` if you want to inspect the status and `Location` explicitly.
-
-Now trace what happened:
+The business path in `OrderPipeline.run()` is:
 
 ```text
-PowerShell sends HTTP + JSON
-    → embedded web server receives the request
-    → Spring MVC matches POST /orders
-    → JSON converter builds CreateOrderRequest
-    → validation checks product and quantity
-    → controller calls the injected OrderService
-    → service creates an Order and stores it in the map
-    → controller selects 201 + Location + body
-    → JSON converter writes the response
+read chat file -> parse messages -> resolve month / check coverage / filter scope
+              -> extract intents / optionally compare with regex
+              -> resolve events / carry opening state -> schedule deliveries
+              -> aggregate report -> write files and print summary
 ```
 
-**Boot's contribution:** it configures the embedded server and supported MVC/JSON infrastructure from the selected dependencies. **Spring Core's contribution:** it discovers and wires the controller/service. **Your contribution:** endpoints, business behavior, data and storage decisions.
+Spring assembles the collaborators; your Java code defines this sequence. Boot does not infer dairy rules, delivery schedules or report contents.
 
-### Step 6: make small predictions, then try them
+### 3. Watch one property choose one implementation
 
-Stop with Ctrl+C before changing code/configuration and restarting, unless you deliberately install development restart support. Ordinary edits do not automatically rebuild the running application.
+In `AppConfig`, `@EnableConfigurationProperties` registers `DairyProperties` and `AzureOpenAiProperties` for binding. The `intentExtractor(...)` bean factory receives those bound objects, a `RegexIntentExtractor` and an `ExtractionCache`.
 
-| Experiment | What to do | Expected observation and lesson |
-| --- | --- | --- |
-| Validate input | POST `{"product":"","quantity":0}` | 400 before the service call; validation is input handling, not database rollback |
-| Unknown order | GET `/orders/00000000-0000-0000-0000-000000000000` | 404 for an ID not created in this run |
-| Bad ID format | GET `/orders/not-a-uuid` | 400 because the path cannot convert to `UUID` |
-| Forget registration | Remove `@Service` and restart | Startup fails: the controller needs an `OrderService`, but none is registered |
-| Break the scan boundary | Move the service outside `example.orders`, updating imports | Default scanning misses it; annotation alone is insufficient |
-| Restart the application | Create an order, stop, restart, GET its old ID | 404: memory was cleared; Boot does not persist your map |
-| Set a property | Add `orders.initial-status=queued` to `application.properties`, then restart | New orders have status `queued`; configuration changes the existing service's input |
-
-For the invalid POST, PowerShell reports the non-success HTTP response as an error. That is expected; inspect the HTTP status rather than relying on a particular version's error-body text.
-
-Bring the code back to its working state after each deliberate failure. Keep the generated context test passing; it can detect broken startup wiring, but does not prove the endpoints or business rules behave correctly.
-
-### Step 7: see configuration precedence, not just read about it
-
-Keep `orders.initial-status=queued` in `application.properties`. Stop the application, package it and locate the actual executable JAR:
-
-```powershell
-.\mvnw.cmd package
-Get-ChildItem .\target\*.jar
-```
-
-Run the generated JAR, substituting its actual name:
-
-```powershell
-java -jar .\target\orders-0.0.1-SNAPSHOT.jar --orders.initial-status=review
-```
-
-Create another order. Its status is **review**, because the CLI overrides the packaged property. Launch without that CLI setting and it becomes **queued** again.
-
-This is the concrete meaning of precedence: you did not change the constructor or service implementation, but a different property source supplied its value. Use `@ConfigurationProperties` from section 4 once several settings belong together.
-
-### Step 8: inspect the running process with Actuator
-
-With the generated Actuator dependency, try:
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8080/actuator/health"
-```
-
-Expect health status `UP` for this working toy application. This does not prove an order was saved correctly; it reports the configured health indicators.
-
-For local learning only, add these settings and restart:
-
-```properties
-management.endpoints.web.exposure.include=health,beans,conditions
-```
-
-Inspect `/actuator/beans` to find the service/controller definitions and `/actuator/conditions` to see configuration matches. These endpoints can expose internal details; do not copy this unauthenticated diagnostic setup into production. Remove the extra exposure after the exercise.
-
-**Recall:** the HTTP endpoint shows application behavior; `beans` shows container composition; `conditions` explains conditional configuration choices.
-
-### Step 9: add complexity only when you can explain the current flow
-
-Do not introduce everything at once:
-
-| Next exercise | Concrete question it answers |
+| Configuration seen by the factory | Returned implementation |
 | --- | --- |
-| Add a service unit test with a chosen initial status | Can I verify behavior without starting Boot? |
-| Add an MVC slice test | Do routing, JSON and invalid-input responses match the contract? |
-| Replace the map with a database/repository | Why does data survive restart, and where does a transaction begin? |
-| Add an event after accepting an order | Is the listener synchronous, and what happens if it fails? |
-| Make that listener async with a bounded executor | What changes about timing, errors and thread-bound context? |
-| Add a simulated delivery failure | How do timeout, retries and supported failure responses interact? |
-| Package and shut down during a request | What do readiness and graceful shutdown actually protect? |
+| `dairy.extractor=regex` | The injected regex extractor |
+| `dairy.extractor=llm`, but Azure configuration is missing | Logs an error and returns the regex extractor |
+| `dairy.extractor=llm`, with Azure configuration present | Builds the model/AI service and returns a new `LlmIntentExtractor` |
 
-This map deliberately does not support durable transactions, compensation, stock checks, security or idempotent order creation. Those are later requirements, not guarantees Boot secretly supplies.
+This is **your explicit factory logic**, not Boot auto-configuration and not `@ConditionalOnProperty`. Configuration being present does not prove credentials are valid or a remote request will succeed. The missing-configuration fallback is not evidence of a general fallback for every later LLM failure.
 
-**First milestone:** explain one POST from terminal to response, identify the two managed beans, change the configured status, and explain why a restart loses orders. Once you can do that, sections 1-9 become descriptions of behavior you have actually observed.
+`OrderPipeline` asks for the interface `IntentExtractor`. The `@Primary` factory bean is the preferred candidate for that injection point; the separately scanned regex component is also injected by its concrete type for comparison. See the [Core guide](Spring-Core-Interview-Notes.md) for the general explanations of dependency resolution and bean scopes.
+
+These settings are bound at startup. Editing a configuration file after the context starts does not automatically rebuild the extractor.
+
+### 4. Find the boundary between Boot defaults and your choices
+
+`pom.xml` uses the Boot parent for dependency/build defaults, the starter for core Boot infrastructure, and the Boot Maven plugin for packaging. Your `AppConfig.objectMapper()` explicitly creates and configures Jackson's mapper, including `JavaTimeModule`. Your `clock()` explicitly supplies a `Clock`.
+
+Do not attribute those factory bodies to Boot: **dependency management makes libraries available; auto-configuration can supply conditional defaults; component scanning finds application components; your `@Bean` methods supply explicit objects.** These are four different mechanisms.
+
+There is no Spring Data/JPA dependency in this POM. The pipeline reads a file and writes reports; do not invent a database repository or transaction boundary to fit a controller-service-repository diagram.
+
+### 5. Use the quiz app as a labelled framework comparison
+
+Open `backend\src\main\java\com\example\quiz\api\QuizResource.java` and `service\QuizGenerationService.java` beneath the same Java package directory.
+
+`QuizResource` uses Jakarta REST `@Path("/api/quizzes")`, `@POST` and `@Path("/generate")` for `POST /api/quizzes/generate`. Its `@Inject` constructor receives `QuizGenerationService`, and `generate(...)` delegates to that service. The service uses CDI `@ApplicationScoped` and constructor injection; it also creates a `QuizRepairer` directly with `new`.
+
+The transferable ideas are "a framework routes the request" and "a container supplies collaborators." The actual frameworks are **Quarkus REST and CDI**, not Spring MVC and Spring's bean factory.
+
+| Quiz app concept | Spring counterpart to learn, not an exact replacement |
+| --- | --- |
+| Jakarta REST `@Path` / `@POST` | Spring MVC `@RestController` / request mapping annotations |
+| CDI constructor `@Inject` | Spring constructor injection; a sole constructor needs no `@Autowired` |
+| CDI `@ApplicationScoped` | Application-lifetime scope to compare with Spring singleton; proxy/lifecycle semantics differ |
+| Quarkus extensions and BOM | Boot starters and dependency management; startup/registration mechanisms differ |
+
+No migration or annotation replacement is needed for this study exercise.
+
+### A focused first study session
+
+Set source breakpoints in the dairy app at `AppConfig.intentExtractor(...)`, the `OrderPipeline` constructor, `PipelineRunner.run(...)`, and `OrderPipeline.run()`. First explain which ones assemble objects and which ones execute business work. If you later run it, use regex mode and separate input/output/cache paths: startup executes the runner, which reads input and writes reports. Do not run the ordinary context test expecting it to be side-effect-free; its `@SpringBootTest` can invoke that runner too.
+
+For a smaller existing example, open `src\test\java\com\example\dairyorderprocessor\pipeline\TargetMonthResolverTest.java`. It constructs the resolver with a fixed clock without starting Spring. This shows why dependency injection is useful even outside a container.
 
 ## Relevance and original-topic coverage
 
 | PDF pages | Original coverage | Assessment |
-|---|---|---|
+| --- | --- | --- |
 | 1 | Executable archives, launchers, WAR initialization | Still useful; launcher package names have changed. Lower priority than auto-configuration. |
 | 1-2 | Lazy initialization, runners, properties, conditions | High value; configuration precedence and readiness need fuller explanations. |
 | 2-3 | Actuator, logging, JSON | High value; the endpoint table contains wrong descriptions and legacy names. |
@@ -281,89 +124,147 @@ This map deliberately does not support durable transactions, compensation, stock
 
 ## 1. Boot's role and auto-configuration
 
-Spring Framework supplies the container, web, data-access and other building blocks. Boot supplies conventions, dependency management, conditional auto-configuration, startup integration, and production tooling. Boot is not a replacement container, and it does not require microservices.
+**Recall:** dependencies make classes available; configuration registers bean definitions; Spring creates and injects the objects.
 
-`@SpringBootApplication` combines `@SpringBootConfiguration`, `@EnableAutoConfiguration`, and `@ComponentScan`. The PDF's suggestion to use only the last two loses the explicit configuration role; use a configuration class as well when decomposing it.
+Spring Framework supplies the container and web/data building blocks. Boot adds dependency management, conditional defaults, startup and production tooling. Boot is not a separate container and does not require a web server or microservices.
 
-**Added: explain the mechanism, not just the annotation.**
+### Application beans versus library defaults
 
-1. Boot imports registered auto-configuration candidates.
-2. Conditions select configurations based on the classpath, environment, existing beans and application type.
-3. Selected configurations contribute bean definitions.
-4. Many defaults back off when an application supplies its own bean, usually through `@ConditionalOnMissingBean`.
-5. The normal Spring container creates and wires the resulting beans.
+`@SpringBootApplication` combines `@SpringBootConfiguration`, `@EnableAutoConfiguration` and `@ComponentScan`.
 
-A starter primarily assembles dependencies. It is not the mechanism that scans every dependency for components. Dependency management aligns compatible versions; it does not make arbitrary version overrides safe.
+| Mechanism | What it does |
+| --- | --- |
+| Dependencies in `pom.xml` | Make library classes/resources available; do not automatically turn every class into a bean |
+| Starter | Groups related dependencies; dependency management aligns their versions |
+| Component scanning | Finds your application's `@Component`, `@Service` and `@Configuration` classes beneath the main class's package |
+| Auto-configuration | Imports registered configurations from Boot/libraries and conditionally supplies bean definitions |
 
-For current custom auto-configurations, know `@AutoConfiguration` and the registration resource `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`. Do not use a remembered `spring.factories` recipe for auto-configuration registration on modern Boot without checking the target version; that resource still has other uses.
+Your dairy app's `AppConfig` is ordinary scanned application configuration. It does not need an auto-configuration registration file. Classes outside the scan boundary require explicit scanning or imports.
 
-`@ConditionalOnClass`, `@ConditionalOnBean`, `@ConditionalOnMissingBean`, `@ConditionalOnProperty`, and web-application conditions are worth knowing. Auto-configuration `before`/`after` ordering orders bean definitions, not bean instantiation; dependencies determine instantiation order.
+### Conditions are registration gates
 
-For debugging, inspect the condition evaluation report (`--debug` or the secured `conditions` Actuator endpoint), the classpath, and the beans already present.
+| Condition | Gate passes when... |
+| --- | --- |
+| `@ConditionalOnClass(ObjectMapper.class)` | The class is available on the classpath; this does not imply a mapper bean exists |
+| `@ConditionalOnMissingBean(IntentExtractor.class)` | No matching bean definition is registered so far |
+| `@ConditionalOnBean(IntentExtractor.class)` | A matching bean definition is registered so far |
+| `@ConditionalOnProperty(prefix = "dairy", name = "enabled", havingValue = "true")` | `dairy.enabled=true`; absent or false does not match unless configured otherwise |
+| `@ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)` | The context is a servlet web application, not a non-web command-line application |
 
-### Sample: the application entry point and scan boundary
+On a configuration class, conditions gate that configuration and its bean definitions. On an individual `@Bean` method, they gate that bean definition. Multiple conditions on the same element must all pass.
 
-```java
-package example.orders;
+**Registration is not instantiation.** A passing condition allows a definition to be registered; Spring later creates the object according to scope, laziness and dependencies. Conditions are not rechecked on every business call.
 
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
+### One example to remember: a reusable extractor library
 
-@SpringBootApplication
-public class OrdersApplication {
-    public static void main(String[] args) {
-        SpringApplication.run(OrdersApplication.class, args);
-    }
-}
-```
+Imagine extracting dairy logic into a normal library JAR, rather than reusing the executable app. The following is proposed library wiring, not the current app's source. Imports and the hypothetical consumer implementation are omitted. Keep the reusable regex class free of component registration for this example, so it is registered only through the conditional factory.
 
-Place services under `example.orders` or its subpackages. A service in `example.delivery` is outside the default component-scan boundary; move it beneath the root, import it, or configure scanning explicitly. Auto-configuration discovery is separate from your application component scan.
-
-**Recall:** starter = dependencies; auto-configuration = conditional recipes; container = actual objects.
-
-### Sample: a default that backs off
-
-Imagine a reusable delivery library supplying this auto-configuration:
+**Library supplies the default:**
 
 ```java
+package example.dairy;
+
 @AutoConfiguration
-class DeliveryAutoConfiguration {
+public class DairyExtractorAutoConfiguration {
     @Bean
-    @ConditionalOnMissingBean(DeliveryClient.class)
-    @ConditionalOnProperty(
-            prefix = "delivery", name = "enabled",
-            havingValue = "true", matchIfMissing = true)
-    DeliveryClient deliveryClient() {
-        return new DefaultDeliveryClient();
+    @ConditionalOnMissingBean(IntentExtractor.class)
+    IntentExtractor intentExtractor() {
+        return new RegexIntentExtractor(new ProductCatalog());
     }
 }
 ```
 
-Register its fully qualified class name in the library resource:
-
-```text
-META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
-
-example.delivery.DeliveryAutoConfiguration
-```
-
-The resource contains the class name, not the path shown above. Do not also component-scan this auto-configuration into the consumer; let Boot import it as auto-configuration.
-
-If the application supplies its own client, the default backs off:
+**Consumer can supply its own bean using ordinary configuration:**
 
 ```java
 @Configuration(proxyBeanMethods = false)
-class DeliveryConfig {
+class ExtractorConfig {
     @Bean
-    DeliveryClient deliveryClient() {
-        return new CompanyDeliveryClient();
+    IntentExtractor customExtractor() {
+        return new CompanyIntentExtractor();
     }
 }
 ```
 
-If `delivery.enabled=false`, the library default is not registered. This property does not disable the application's custom bean; its condition applies only to the default factory method. Any required consumer still needs a client or must be conditional too.
+Assuming the consumer configuration is discovered:
 
-**Scenario:** "I added a bean and Boot stopped creating its default." Usually this is intended back-off, not broken scanning. Inspect the condition report to see the exact reason.
+| Consumer registers an `IntentExtractor` definition? | Result |
+| --- | --- |
+| No | Library registers its default; Spring creates the regex extractor when needed |
+| Yes | Library skips its default; the consumer's extractor is used |
+
+Boot processes ordinary user configuration before deferred auto-configuration. The custom bean **does not need to have been instantiated** for back-off to happen. If its factory later fails, startup fails; the library does not then retry with its default.
+
+This condition checks **type**, so `customExtractor` need not have the same name as `intentExtractor`. The consumer is not replacing an already-created object or editing a library registration file. Without the missing-bean condition, both definitions could be registered and injection could be ambiguous.
+
+If a competing bean comes from another auto-configuration, use appropriate `before`/`after` ordering. That orders definition registration, not object construction.
+
+### Where `AutoConfiguration.imports` fits
+
+For automatic discovery, **the library author**, not the consumer, writes:
+
+```text
+src\main\resources\META-INF\spring\org.springframework.boot.autoconfigure.AutoConfiguration.imports
+```
+
+The file contains configuration class names, one per line:
+
+```text
+example.dairy.DairyExtractorAutoConfiguration
+```
+
+It is packaged inside the library JAR under `META-INF/spring/...`. That slash-separated form is a JAR resource name, not a Windows filesystem command.
+
+```text
+Consumer adds dependency and enables Boot auto-configuration
+    -> Boot reads the library's imports list
+    -> evaluates the listed configuration's conditions
+    -> registers matching bean definitions
+    -> Spring creates and injects the objects
+```
+
+**The file lists recipes; the `@Bean` methods define defaults.** `@AutoConfiguration` alone does not make an arbitrary dependency class discoverable. Boot's own dependency JARs already contain its lists, which is why you normally do not write this file.
+
+A plain library needs no such file: the consumer can construct/wire its classes or explicitly use `@Import(DairyLibraryConfig.class)`. Do not also component-scan a library's auto-configuration. Modern Boot uses this imports resource for auto-configuration registration, not the older `spring.factories` recipe; `spring.factories` still has other uses.
+
+### Real Boot example: its default Jackson mapper backs off
+
+The same pattern applies to Jackson in **Boot 3.x with `spring-boot-starter-web`**, where both Jackson and Spring's mapper builder are normally available.
+
+**Boot's default factory, shortened for explanation:**
+
+```java
+@Bean
+@Primary
+@ConditionalOnMissingBean(ObjectMapper.class)
+ObjectMapper jacksonObjectMapper(Jackson2ObjectMapperBuilder builder) {
+    return builder.createXmlMapper(false).build();
+}
+```
+
+**Your application's custom factory:**
+
+```java
+@Configuration(proxyBeanMethods = false)
+class JsonConfig {
+    @Bean
+    ObjectMapper applicationMapper(Jackson2ObjectMapperBuilder builder) {
+        return builder
+                .featuresToEnable(SerializationFeature.INDENT_OUTPUT)
+                .build();
+    }
+}
+```
+
+No custom mapper definition: Boot registers its default. Custom definition present: Boot skips that default factory, even though the names differ. Other Jackson configuration can still apply.
+
+These snippets use Jackson 2 and Spring's `Jackson2ObjectMapperBuilder`; Boot 4's default Jackson 3 APIs differ. The [Boot 3.5 source](https://github.com/spring-projects/spring-boot/blob/v3.5.0/spring-boot-project/spring-boot-autoconfigure/src/main/java/org/springframework/boot/autoconfigure/jackson/JacksonAutoConfiguration.java) uses bare `@ConditionalOnMissingBean`, inferring the type from the factory's return type.
+
+Your dairy app has a custom mapper but only the core starter. Do not assume removing that factory would produce Boot's default: its builder-class prerequisite must also be satisfied.
+
+**To observe back-off:** start the web example with `--debug` and inspect `JacksonAutoConfiguration.JacksonObjectMapperConfiguration#jacksonObjectMapper` in the condition report. With your mapper present, it reports the existing bean as the reason the default did not match.
+
+**Quick recall:** class available is not bean registered; bean registered is not object already created; user bean present means a well-designed missing-bean default backs off.
 
 ## 2. Executable JARs, WARs and containers
 
@@ -423,7 +324,7 @@ With the Maven plugin and a compatible build environment, `.\mvnw.cmd spring-boo
 
 `ApplicationRunner` receives parsed `ApplicationArguments`; `CommandLineRunner` receives the raw string arguments. Both run during Boot startup before `SpringApplication.run` completes. Order multiple runners deliberately.
 
-The PDF's "before it starts accepting traffic" needs a qualification: the server may already be listening. Readiness-based routing should keep traffic away until startup work completes; a runner is not a universal network barrier.
+The PDF's "before it starts accepting traffic" needs a qualification: the server may already be listening. Readiness-based routing should keep traffic away until startup work completes; a runner is not a universal netw,,ork barrier.
 
 `spring.main.lazy-initialization=true` delays creation of many beans. Benefits: less startup work. Costs: delayed configuration failures, first-request latency, and memory requirements becoming apparent later. `@Lazy(false)` can opt particular beans out. A lazy bean required by an eager bean may still be created at startup.
 
@@ -578,6 +479,19 @@ management:
 ```
 
 With Actuator and supported web infrastructure, health probes are available at `/actuator/health/liveness` and `/actuator/health/readiness`. Enabling probes explicitly makes the sample independent of automatic Kubernetes detection. Exposure does not itself define authentication or network access; configure those separately.
+
+### On AKS: separate URLs, no custom controller methods
+
+**Actuator supplies both endpoints.** You do not need to write a liveness controller and a readiness controller. Behind the scenes, they are separate health groups backed by Spring Boot's `ApplicationAvailability` states.
+
+| Endpoint | What it reports | Kubernetes action after the configured failure threshold |
+| --- | --- | --- |
+| `/actuator/health/liveness` | Application liveness state | Restarts the container |
+| `/actuator/health/readiness` | Application readiness state | Marks the pod unready, removing it from normal Service traffic |
+
+Boot manages the normal startup availability transitions; readiness normally reaches accepting traffic after startup runners complete. You can add health indicators or explicitly change availability state for application-specific requirements. A successful default liveness response is not proof that every business operation works.
+
+**Your responsibility:** configure the AKS Deployment's probes to call the corresponding URLs on the pod, allow access through application security and network controls, and decide whether readiness needs additional checks. Actuator reports state; Kubernetes performs restarts and traffic-routing changes. Installing Actuator does not configure Kubernetes probes for you.
 
 ```text
 Liveness:  Is this instance unhealthy in a way restarting may fix?
