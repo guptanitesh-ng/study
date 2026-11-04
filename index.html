@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#172554">
+  <meta name="description" content="An offline-friendly reader for Markdown study notes.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>Study Notes</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#document">Skip to note</a>
+  <div class="app-shell">
+    <header class="topbar">
+      <button id="library-toggle" class="icon-button mobile-only" type="button" aria-controls="library" aria-expanded="false">Library</button>
+      <a class="brand" href="./">Study Notes</a>
+      <div class="topbar-actions">
+        <button id="outline-toggle" class="icon-button" type="button" aria-controls="outline-panel" aria-expanded="false">Outline</button>
+        <span id="progress-label" class="progress-label" aria-live="polite">0%</span>
+      </div>
+      <div class="progress-track" aria-hidden="true"><div id="progress-bar"></div></div>
+    </header>
+
+    <aside id="library" class="library" aria-label="Note library">
+      <div class="panel-heading">
+        <h2>Library</h2>
+        <button id="library-close" class="close-button mobile-only" type="button" aria-label="Close library">Close</button>
+      </div>
+      <label class="search-label" for="note-search">Filter notes</label>
+      <input id="note-search" type="search" placeholder="Search titles" autocomplete="off">
+      <nav id="note-list" aria-label="Markdown notes"></nav>
+      <p id="offline-status" class="status-text" hidden>You are offline. Previously cached notes remain available.</p>
+    </aside>
+
+    <main id="reader" class="reader">
+      <div id="loading" class="message" role="status">Loading notes...</div>
+      <article id="document" class="markdown-body" tabindex="-1" hidden></article>
+      <div id="error" class="message error" role="alert" hidden></div>
+      <nav class="document-nav" aria-label="Adjacent notes">
+        <button id="previous-note" type="button">Previous</button>
+        <button id="next-note" type="button">Next</button>
+      </nav>
+    </main>
+
+    <aside id="outline-panel" class="outline" aria-label="Document outline">
+      <div class="panel-heading">
+        <h2>Outline</h2>
+        <button id="outline-close" class="close-button" type="button" aria-label="Close outline">Close</button>
+      </div>
+      <nav id="outline-list" aria-label="Headings"></nav>
+    </aside>
+  </div>
+  <div id="backdrop" class="backdrop" hidden></div>
+
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

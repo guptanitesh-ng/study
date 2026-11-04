@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "notes": [
+    {
+      "path": "Authentication-Authorization-Patterns.md",
+      "title": "Authentication and Authorization: Application Patterns",
+      "bytes": 51159
+    },
+    {
+      "path": "Spring-Boot-Interview-Notes.md",
+      "title": "Spring Boot: Interview Notes",
+      "bytes": 59477
+    },
+    {
+      "path": "Spring-Core-Interview-Notes.md",
+      "title": "Spring Core: Interview Notes (refreshed for 2026)",
+      "bytes": 84458
+    },
+    {
+      "path": "Spring-Data-Interview-Notes.md",
+      "title": "Spring Data and Data Access: Interview Notes",
+      "bytes": 46403
+    },
+    {
+      "path": "Spring-REST-MVC-Interview-Notes.md",
+      "title": "Spring REST + MVC: Interview Notes",
+      "bytes": 56019
+    },
+    {
+      "path": "Spring-Security-Interview-Notes.md",
+      "title": "Spring Security: Interview Notes",
+      "bytes": 18579
+    }
+  ]
+}
