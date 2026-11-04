@@ -1,223 +1,256 @@
 # Spring Security: Interview Notes
 
-Reviewed: October 31, 2026. Source: the five-page Spring Security PDF, dated August 16, 2019; its last page contains references to a separate finance application.
+Preparation focus: **security concepts and real-world decisions first; Spring implementation second**. Use [Authentication and Authorization: Application Patterns](Authentication-Authorization-Patterns.md) as the primary guide, especially its [scenario-led study plan](Authentication-Authorization-Patterns.md#9-focused-study-plan-security-decisions-and-defenses).
 
-This editorial Markdown conversion keeps the architectural concepts, replaces removed APIs/unsafe simplifications, and adds modern authorization/OAuth2/testing coverage. It is not a verbatim transcript or a runnable security configuration. The external finance-application examples and PDF diagrams are not reproduced; their behavior cannot be inferred from their names.
+This is a compact framework companion, not a filter inventory or a configuration-memorization exercise. It retains the useful concepts from the August 2019 PDF while replacing its obsolete adapter-based recipes. Examples target **Boot 3.5 / Spring Security 6.5 Servlet applications**, omit imports/domain setup and are not an executed application. Match APIs and defaults to the actual project version.
 
-Study sequence: [Core](Spring-Core-Interview-Notes.md) -> [Boot](Spring-Boot-Interview-Notes.md) -> [REST + MVC](Spring-REST-MVC-Interview-Notes.md) -> [Data](Spring-Data-Interview-Notes.md) -> **Security**.
-
-## Relevance and original-topic coverage
-
-| PDF pages | Original coverage | Assessment |
-|---|---|---|
-| 1 | Servlet filter architecture, adapter-based configuration | Architecture remains valuable; adapter/configuration recipes are obsolete. |
-| 2-3 | AuthenticationManager, providers, user details, remember-me | Keep concepts; fix provider contracts, roles/password examples and remember-me assumptions. |
-| 3 | Sessions, context persistence, fixation protection | Essential; statelessness guarantee and historical defaults are misleading. |
-| 3-4 | CORS, CSRF, logout | Essential; "no cookies = no CSRF" is not a sufficient security rule. |
-| 5 | External LogoutFilter/SecurityContext examples | Replace missing references with self-contained conceptual coverage below. |
+Study sequence: [Core](Spring-Core-Interview-Notes.md) -> [Boot](Spring-Boot-Interview-Notes.md) -> [REST + MVC](Spring-REST-MVC-Interview-Notes.md) -> [Data](Spring-Data-Interview-Notes.md) -> [Security concepts and scenarios](Authentication-Authorization-Patterns.md) -> this Spring companion.
 
 ## 1. Servlet security architecture
 
 ```text
-Servlet container filter chain
-  -> DelegatingFilterProxy
-  -> FilterChainProxy
-  -> first matching SecurityFilterChain
-  -> authentication / exploit protection / authorization filters
-  -> remaining Servlet filters and mapped Servlet
+Request -> Servlet filter bridge -> first matching SecurityFilterChain
+    -> credential validation / context restoration
+    -> request authorization -> controller -> service/resource authorization
 ```
 
-`DelegatingFilterProxy` bridges Servlet registration to a Spring-managed filter, typically the `springSecurityFilterChain` bean. `FilterChainProxy` selects the first matching `SecurityFilterChain`. It does not run every matching chain.
+`DelegatingFilterProxy` connects the Servlet container to Spring; `FilterChainProxy` selects a chain. Know the responsibilities, not every internal filter or its historical order. WebFlux has a separate reactive chain.
 
-Filter order matters, but do not memorize the PDF's historical ten-filter inventory as a universal current chain. The actual chain depends on configured features and version. Modern request authorization commonly uses `AuthorizationFilter`, not the old `FilterSecurityInterceptor` recipe.
-
-Boot can register the bridge automatically; `@EnableWebSecurity` by itself is not a generic replacement for Servlet filter registration in every deployment.
-
-**Added:** when multiple chains exist, distinguish the chain's `securityMatcher` from authorization `requestMatchers` within it. A request matching no chain is not protected by those chains; design a deliberate catch-all policy.
-
-WebFlux uses a separate reactive security chain (`SecurityWebFilterChain`), not Servlet filters.
+**Keep:** only the first matching chain runs. `securityMatcher` selects a chain; `requestMatchers` select authorization rules inside it. A request matching no chain is not protected by those chains.
 
 ## 2. Modern configuration
 
-**Replace**, do not copy, these historical recipes:
-
-| PDF API / pattern | Modern direction |
-|---|---|
-| Extend `WebSecurityConfigurerAdapter` | Declare a `SecurityFilterChain` bean. The adapter was removed in Security 6. |
-| `@EnableWebMvcSecurity` | Use supported web-security configuration; this annotation is obsolete. |
-| `.authorizeRequests().and()` chains | `authorizeHttpRequests` with the lambda DSL; the lambda style is required for Security 7 configuration. |
-| `javax.servlet.*` | `jakarta.servlet.*` on the modern stack. Do not rename unrelated Java SE `javax` packages. |
-| Hardcoded sample passwords | An appropriate adaptive `PasswordEncoder` and externally provisioned/test-only identities. |
-| `.roles("ROLE_ADMIN")` | Typically `.roles("ADMIN")`, or explicit `.authorities("ROLE_ADMIN")`; do not duplicate the role prefix. |
-
-A conceptual Servlet configuration shape:
+Declare `SecurityFilterChain` beans using the lambda DSL, not `WebSecurityConfigurerAdapter` (removed in Security 6). Modern Servlet APIs use `jakarta.servlet`, not the old `javax.servlet` namespace.
 
 ```java
 @Bean
-SecurityFilterChain webSecurity(HttpSecurity http) throws Exception {
+SecurityFilterChain web(HttpSecurity http) throws Exception {
     http.authorizeHttpRequests(auth -> auth
-        .requestMatchers("/public/**").permitAll()
-        .anyRequest().authenticated());
+            .requestMatchers("/public/**").permitAll()
+            .anyRequest().authenticated());
     http.formLogin(Customizer.withDefaults());
     return http.build();
 }
 ```
 
-This is an illustrative fragment, not a complete application: imports, identity provisioning, session/CSRF policy and precise public endpoints must be chosen for the use case. CSRF remains enabled by default here. A bearer-token API needs a different authentication arrangement.
-
-Do not rely on Boot's generated development credentials or default policy as a production design.
+This is a form-login shape, not a JSON login endpoint. Supply real identity provisioning and password configuration. CSRF remains enabled; do not treat Boot's generated development identity as production account management.
 
 ## 3. Authentication contracts
 
-**Authentication** establishes identity; **authorization** decides whether that identity may perform an action on a specific resource.
+| Responsibility | Spring mechanism |
+| --- | --- |
+| Extract credentials | Mechanism-specific authentication filter |
+| Coordinate verification | `AuthenticationManager`, commonly `ProviderManager` |
+| Verify a supported credential | `AuthenticationProvider` |
+| Load password-account details | `UserDetailsService` |
+| Verify stored password hash | Password provider with `PasswordEncoder` |
+| Represent verified identity and permissions | `Authentication` and its `GrantedAuthority` values |
 
-- An authentication filter extracts credentials and constructs a request `Authentication`.
-- `AuthenticationManager` authenticates that request. `ProviderManager` is a common implementation coordinating compatible providers.
-- `AuthenticationProvider.supports` declares supported token types.
-- A provider may return a successful `Authentication`, throw an authentication exception, or return `null` to let another provider try. `null` is not a "confused state".
-- The manager's contract is a successfully authenticated result or failure; do not generalize the provider's `null` option to the manager.
-- `UserDetailsService` loads user details; it does not itself validate the presented password. A password-based provider commonly combines it with a `PasswordEncoder`.
-
-Provider ordering matters, but the PDF's "any error-free return stops every subsequent provider" is wrong: `null` permits continuation, and particular exception/provider behavior matters.
-
-`GrantedAuthority` is a permission label; role conventions commonly use `ROLE_`. OAuth scopes commonly map to `SCOPE_` authorities, not automatically to application roles.
-
-A custom provider is for a genuine custom mechanism. Prefer established password, OAuth2, OIDC or certificate integrations when appropriate. Never compare plaintext credentials to hardcoded strings in production or retain credentials unnecessarily.
+Loading a user is not authenticating a password. Prefer supported providers over custom credential checks. A provider may return `null` to defer to another provider; the manager's contract is authenticated success or failure.
 
 ## 4. SecurityContext and sessions
 
-`SecurityContext` contains the current `Authentication`. Servlet applications commonly use a thread-local `SecurityContextHolder`; context must be cleaned up after request processing.
+`SecurityContext` holds the current `Authentication`; Servlet code commonly accesses it through `SecurityContextHolder`. The configured `SecurityContextRepository` handles persistence/restoration where required.
 
-Authentication persistence across requests uses a `SecurityContextRepository`. In modern setups, setting the holder is not automatically equivalent to explicitly persisting authentication. Custom authentication code must follow the configured save mechanism.
+Setting a thread's context is not a complete persistent login. Custom login must also apply the configured session-authentication protections and context-save mechanism. Prefer the standard flow.
 
-Security 6 changed defaults: `SecurityContextHolderFilter` commonly replaces the older persistence-filter arrangement, and `SessionManagementFilter` is not installed by default. Do not extrapolate the PDF's exact filter inventory.
+`SessionCreationPolicy.STATELESS` tells Spring Security not to use an HTTP session for the security context. It does **not** prevent every component from creating a session/cookie, eliminate CSRF automatically or remove business/authorization state.
 
-| SessionCreationPolicy | Security's intent |
-|---|---|
-| `ALWAYS` | Create a session. |
-| `IF_REQUIRED` | Create when needed. |
-| `NEVER` | Do not create, but may use an existing session. |
-| `STATELESS` | Do not create or use an HTTP session for storing/retrieving the SecurityContext. |
-
-**Critical correction:** `STATELESS` does not guarantee no other application code creates sessions or cookies. It does not mean an API is automatically CSRF-safe.
-
-Session fixation protection prevents continuing an attacker's known session identity after login. Modern Servlet containers commonly use `changeSessionId`; the PDF's universal `migrateSession` default is historical. Discuss fixation, expiration, concurrent sessions and logout separately.
-
-For async work, deliberately propagate authorized context where appropriate; do not assume arbitrary new threads inherit it. Reactive security uses Reactor context. A long-running task should not retain stale authorization indefinitely.
+Do not assume arbitrary async threads inherit identity. Propagate context deliberately and clean it up; do not preserve stale authorization indefinitely.
 
 ## 5. Remember-me and logout
 
-Remember-me is persistent re-authentication, not simply an indefinitely valid login session. Supported mechanisms include token-based and persistent-token arrangements. Protect tokens, choose lifetimes, consider revocation/theft, and require stronger authentication for sensitive operations.
+Remember-me is persistent re-authentication, not an indefinitely valid session. Its cookies remain credentials requiring protection and lifecycle policy.
 
-Do not copy `alwaysRemember(true)` from the old sample as a default, or combine it with a stateless policy without explaining how the mechanism works. A remember-me cookie is still browser-supplied authentication material.
-
-Logout can clear the holder/repository, invalidate an application session, and remove relevant cookies/tokens according to configuration. With CSRF protection, POST is normally the state-changing logout action; a GET may serve a confirmation page.
-
-An API's JWT logout is different: deleting a browser token does not revoke every copy of an already-issued JWT. Explain expiration, refresh-token revocation and server-side revocation strategies when required.
+Spring logout can clear context, invalidate the application session and remove configured cookies. With CSRF protection, the state-changing logout action is normally POST. Application logout, provider logout and access/refresh-token revocation are separate decisions: see [credential lifecycle](Authentication-Authorization-Patterns.md#7-lifecycle-and-optional-gateway-hybrid).
 
 ## 6. CORS: browser permission, not authorization
 
-CORS controls whether browser JavaScript may access cross-origin responses. It does not authenticate callers or prevent non-browser clients from sending requests.
+Configure trusted origins, methods and headers through consistent MVC/Security CORS integration, activated with `http.cors(...)` where appropriate. Preflight handling must not require credentials the browser does not send on preflight.
 
-- Only some cross-origin requests require a preflight; the PDF incorrectly implies all do.
-- Handle CORS before authentication that would reject preflight requests without credentials.
-- Configure explicit trusted origins, methods and headers as appropriate.
-- `Access-Control-Allow-Origin: *` is incompatible with credentialed cross-origin response access. Do not describe the wildcard as proof that the browser never sends credentials at all.
-- A simple cross-origin request can reach the server even when JavaScript cannot read its response. CORS is not a replacement for CSRF protection.
-
-Use Spring MVC/Security CORS integration consistently. Do not reflect arbitrary origins while allowing credentials.
+CORS controls browser response access, not caller identity or resource authorization. A simple cross-origin request may execute even if its response is unreadable. Do not solve CORS errors with `permitAll`, arbitrary origin reflection or by disabling CSRF.
 
 ## 7. CSRF and XSS
 
-CSRF exploits credentials the browser attaches automatically to induce an unwanted state-changing request. Cookie sessions are common, but browser-managed HTTP authentication is also relevant. Therefore **"no cookies = no CSRF" is too broad**.
+Spring Security enables CSRF protection by default for unsafe methods. Browser session/remember-me cookies and other automatically attached credentials require CSRF analysis. JSON and JWT do not decide the policy.
 
-Decide based on the credential transport and client behavior:
+For session-based SPAs, follow the version-appropriate token repository/request-handler recipe, including login/logout renewal. An automatically returned cookie alone is not the submitted anti-CSRF proof. A readable CSRF cookie does not justify a readable authentication cookie.
 
-| Arrangement | Study guidance |
-|---|---|
-| Browser session/remember-me cookies | Preserve appropriate CSRF protection for unsafe actions. |
-| Browser-automatically supplied authentication | Analyze CSRF risk even without session cookies. |
-| API bearer header explicitly set by the client, no ambient credential fallback | CSRF may not apply in the same way; document assumptions before disabling it. |
-| Bearer token moved into an authentication cookie | Re-evaluate CSRF; JWT format does not eliminate browser credential behavior. |
+A bearer-only API with explicitly attached credentials and no ambient fallback can have a different CSRF policy. XSS still matters: HttpOnly blocks direct cookie reading, not every action malicious same-origin script can perform.
 
-Spring Security protects unsafe methods by default. Safe methods must not perform intentional state changes.
+Use the [scenario plan](Authentication-Authorization-Patterns.md#9-focused-study-plan-security-decisions-and-defenses) for the threat models; use Spring documentation for the exact integration.
 
-CSRF protection uses a token repository and request handler, with session and cookie repositories available. A token sent back automatically only as a cookie is not proof of a legitimate action; request validation typically requires the submitted header/form token as well.
+## 8. Spring integration map
 
-Modern Security defers token loading and applies BREACH-related handling. The old "CSRF always immediately creates a session" statement is not a universal description.
+Choose the pattern in the companion guide; retain only the matching Spring entry point.
 
-For SPAs, follow the current framework recipe, including token lifecycle after login/logout. A readable CSRF cookie may be necessary for a JavaScript integration; that is not a reason to make the authentication/session cookie readable.
+### 8.1 Choose an application pattern before choosing classes
 
-XSS and CSRF are distinct. XSS can often compromise CSRF defenses, but CSRF does not require XSS. Defend rendered content with appropriate output encoding and related controls; CORS does not prevent same-origin malicious script from reading accessible data.
+Use established integrations. Do not implement OAuth by writing a controller that signs JWTs, or replace Resource Server support with a signature-only Servlet filter.
 
-## 8. Added essentials missing from the PDF
+### 8.2 Pattern A: application-owned login and server session
 
-**Request and method authorization:** explicit defaults, `@EnableMethodSecurity`, `@PreAuthorize` where appropriate, proxy boundaries, and object/tenant ownership checks. A role-only check does not prevent one user accessing another user's record.
+[Pattern A](Authentication-Authorization-Patterns.md#2-pattern-a-application-owned-login-and-server-session) maps to `formLogin`, a password provider, `UserDetailsService`, `PasswordEncoder` and session context persistence. Section 2 shows the configuration shape. Keep CSRF and session protections.
 
-**OAuth2/OIDC:** distinguish an authorization server, OAuth client and resource server. OAuth2 is an authorization framework; OIDC adds an identity layer. Know authorization code with PKCE, service-to-service client credentials and bearer-token handling.
+### 8.3 Pattern B: enterprise OIDC login with a backend session
 
-**JWT versus opaque tokens:** JWT resource servers verify signatures and validate relevant claims; opaque tokens commonly use introspection. Configure issuer, audience and authority mapping for the application; decoding a token is not validating it. JWT is not automatically encrypted or immediately revocable.
+[Pattern B](Authentication-Authorization-Patterns.md#3-pattern-b-external-oidc-login-with-a-backend-session) maps to `spring-boot-starter-oauth2-client` and `http.oauth2Login(Customizer.withDefaults())`.
 
-**Passwords/secrets:** adaptive hashing, encoder compatibility, credential rotation, TLS, secure cookie settings and no sensitive logging.
+Configure client registration, trusted issuer, `openid` scope, exact callback URI and provider-compatible client/PKCE settings. The login integration validates the OIDC response and establishes a session. A complete BFF also needs server-side token storage, downstream scopes/audience, an outbound client and browser/session protections.
 
-**Failure responses:** `AuthenticationEntryPoint` for unauthenticated failures and `AccessDeniedHandler` for access denial. Typical API outcomes are 401 versus 403; form login may redirect. MVC advice does not catch every filter-level failure.
+### 8.4 Pattern C: SPA obtains a token and calls the resource server
 
-**Tests:** Spring Security test support, authenticated/anonymous cases, wrong role/scope, CSRF tokens, chain matching, CORS preflight, invalid/expired issuer/audience tokens and cross-tenant access. Mock identities do not prove real token signature validation; include integration tests for that path.
+[Pattern C](Authentication-Authorization-Patterns.md#4-pattern-c-spa-obtains-a-token-and-calls-the-resource-server) maps to `spring-boot-starter-oauth2-resource-server` and `http.oauth2ResourceServer(resource -> resource.jwt(Customizer.withDefaults()))`.
 
-## 9. 2026 and AI-age application security
+Configure the trusted issuer, API audience, key/algorithm policy and authority conversion. Validate claims in addition to the signature. The API does not need `oauth2Login` for this role. A bearer-only chain may use `STATELESS`; justify CSRF policy from credential transport and configure CORS separately.
 
-For AI features, preserve the same authorization boundaries:
+### 8.5 Pattern D: service-to-service client credentials
 
-- Retrieved documents must obey caller/tenant permissions before reaching the model.
-- Model-proposed tool calls are untrusted requests, not grants of authority.
-- Authorize each operation in application code; validate schema and business rules; require explicit approval for consequential actions where appropriate.
-- Do not let prompt text supply identity, role, tenant or arbitrary query/command authority.
-- Treat MCP as an integration protocol, not a replacement for authentication/authorization. Apply least privilege, transport security and the appropriate current authentication model.
-- Protect tokens, prompts, retrieved sensitive content and audit records. Use safe telemetry and cost/rate budgets.
+[Pattern D](Authentication-Authorization-Patterns.md#5-pattern-d-service-to-service-client-credentials) maps to OAuth2 Client support on the caller and Resource Server support on the receiver.
 
-AI-generated `SecurityFilterChain` examples deserve the same review as human-written ones. Watch especially for blanket `permitAll`, broad matcher gaps and unexplained `csrf.disable()`.
+Register the `client_credentials` grant and supported client authentication. Use `OAuth2AuthorizedClientManager` to acquire/manage tokens, then wire it into the outbound client. For workers outside a Servlet request, `AuthorizedClientServiceOAuth2AuthorizedClientManager` is a suitable implementation. Declaring a manager alone sends no request.
 
-## 10. Interview drills
+### 8.6 Responsibility-to-class map
 
-- Two chains match an API URL. Which runs, and what if neither matches?
-- `UserDetailsService` finds a user. Why is authentication not complete yet?
-- A stateless API still sets cookies. Explain what the policy actually controls.
-- A CORS-rejected POST changed data. Explain response access versus request execution.
-- A JWT signature is valid but its audience is wrong. Explain why access should still fail.
-- A service has `@PreAuthorize` but calls itself internally. Explain proxy boundaries.
-- A model asks to read another tenant's document. Identify the authorization boundary.
+| Boundary | Mechanism worth recognizing |
+| --- | --- |
+| Request policy | `SecurityFilterChain`, `HttpSecurity` |
+| Bearer extraction/validation | `BearerTokenAuthenticationFilter`; JWT provider/decoder or opaque-token provider/introspector |
+| Current identity | `Authentication`, `SecurityContext` |
+| Request/service authorization | `AuthorizationManager`; method security enabled with `@EnableMethodSecurity` |
+| Unauthenticated/access-denied responses | `AuthenticationEntryPoint`, `AccessDeniedHandler` |
 
-## Change references
+## OAuth, OIDC, JWT and opaque tokens: Spring integration
 
-**Version change** identifies changed APIs/defaults; **correction** identifies an inaccurate original claim; **addition** identifies missing coverage. Locations refer to PDF pages. References were checked during the October 31, 2026 review; current URLs may later advance.
+The [companion guide](Authentication-Authorization-Patterns.md#6-oauth-oidc-jwt-and-opaque-tokens-different-layers) owns the protocol distinctions and trade-offs.
 
-| Original location / claim | Category and correction | Official evidence |
-|---|---|---|
-| pp. 1-3: WebSecurityConfigurerAdapter recipes | Version change: component-based SecurityFilterChain configuration; adapter deprecation began in 5.7 and is not a modern API. | [Official adapter migration article](https://spring.io/blog/2022/02/21/spring-security-without-the-websecurityconfigureradapter) |
-| pp. 1-3: chained non-lambda DSL | Version change: lambda configuration is required for Security 7, not simply a style preference. | [Version-pinned Security 6.5 preparation for 7](https://docs.spring.io/spring-security/reference/6.5/migration-7/configuration.html) |
-| p. 1: fixed ten-filter list / all matching filters | Qualification: configured features determine filters; FilterChainProxy selects the first matching chain. | [Servlet security architecture](https://docs.spring.io/spring-security/reference/servlet/architecture.html) |
-| p. 2: null means confused authentication; p. 3: every error-free provider stops lookup | Correction: providers can return null to defer; the manager returns successful authentication or throws on failure. | [AuthenticationProvider API](https://docs.spring.io/spring-security/reference/api/java/org/springframework/security/authentication/AuthenticationProvider.html) and [AuthenticationManager API](https://docs.spring.io/spring-security/reference/api/java/org/springframework/security/authentication/AuthenticationManager.html) |
-| p. 2: roles with ROLE_ prefix / hardcoded password | Correction: role helpers add the prefix; use properly encoded/provisioned credentials. | [In-memory users](https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/in-memory.html) and [password storage](https://docs.spring.io/spring-security/reference/features/authentication/password-storage.html) |
-| p. 3: STATELESS guarantees no application session | Correction: SecurityContext session policy does not control every application component. | [Session management](https://docs.spring.io/spring-security/reference/servlet/authentication/session-management.html) |
-| p. 3: persistence/session filters always default; migrateSession always default | Version-aware correction: Security 6 defaults changed, explicit saving matters for custom auth, modern containers support changeSessionId. | [Session/context persistence and fixation](https://docs.spring.io/spring-security/reference/servlet/authentication/session-management.html) |
-| pp. 3-4: every cross-origin request preflights; wildcard prevents any credential sending | Correction: browser CORS processing is conditional; response-access rules are not server authorization. | [Spring Security CORS](https://docs.spring.io/spring-security/reference/servlet/integrations/cors.html) and [Spring MVC CORS](https://docs.spring.io/spring-framework/reference/web/webmvc-cors.html) |
-| p. 4: "No cookies = No CSRF" | Correction, not new in 2026: browser-automatically supplied credentials can include other mechanisms; analyze transport. | [CSRF attack model and stateless browser applications](https://docs.spring.io/spring-security/reference/features/exploits/csrf.html) |
-| p. 4: enabling CSRF always creates a session immediately | Version change/qualification: deferred token loading in Security 6, repository choice and SPA lifecycle matter. | [CSRF components and 5-to-6 changes](https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html) |
-| pp. 3, 5: remember-me/logout references | Expansion: persistent authentication and logout cleanup differ from JWT revocation. | [Remember-me](https://docs.spring.io/spring-security/reference/servlet/authentication/rememberme.html) and [logout](https://docs.spring.io/spring-security/reference/servlet/authentication/logout.html) |
-| OAuth2/JWT and method authorization absent | Addition: token validation/authority mapping and service authorization belong in modern preparation. | [JWT resource server](https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html) and [method security](https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html) |
+JWT Resource Server support uses a `JwtDecoder` and validators. Opaque-token support uses an `OpaqueTokenIntrospector` configured with the provider's introspection endpoint and API credentials. In either case, enforce intended-resource and permission policy; successful validation is not universal authorization. Verify provider support rather than assuming introspection exists.
 
-Older migration articles are retained to explain history, not as copy-paste configuration for every modern version.
+## 9. Broader security belongs in the scenario plan
 
-## Official references
+Injection, SSRF, browser attacks, credential theft, multi-tenant isolation, abuse prevention, dependency/configuration risks and AI/tool authorization are not solved merely by installing Spring Security.
 
-- [Servlet security architecture](https://docs.spring.io/spring-security/reference/servlet/architecture.html)
+Study them through [the focused plan](Authentication-Authorization-Patterns.md#9-focused-study-plan-security-decisions-and-defenses). Return here only to map a required control to Spring.
+
+## 10. Interview questions: the Spring-specific core
+
+These are the questions to rehearse for Spring. Broader architecture questions are organized as scenarios in the companion guide. Numbering is intentionally compact rather than retaining the previous 23-question inventory.
+
+### 10.1 Two security chains match. Do both run?
+
+**Answer:** only the first matching chain runs. Give specific API chains higher precedence and provide a deliberate catch-all policy.
+
+**Scenario:** `/api/**` needs bearer authentication, while unrecognized routes must not accidentally become public. Test matching and non-matching routes; checking annotations alone is insufficient.
+
+```java
+@Bean
+@Order(1)
+SecurityFilterChain api(HttpSecurity http) throws Exception {
+    http.securityMatcher("/api/**");
+    http.sessionManagement(session -> session
+            .sessionCreationPolicy(SessionCreationPolicy.STATELESS));
+    http.csrf(csrf -> csrf.disable());
+    http.authorizeHttpRequests(auth -> auth.anyRequest().authenticated());
+    http.oauth2ResourceServer(resource -> resource.jwt(Customizer.withDefaults()));
+    return http.build();
+}
+
+@Bean
+@Order(2)
+SecurityFilterChain fallback(HttpSecurity http) throws Exception {
+    http.authorizeHttpRequests(auth -> auth.anyRequest().denyAll());
+    return http.build();
+}
+```
+
+For `/api/orders/123`, both chain matchers match, but only the `@Order(1)` chain runs. For `/other`, only the catch-all chain matches and denies access. The fallback is not a second authorization pass after the API chain.
+
+This assumes a configured JWT decoder with trusted issuer, audience and key/algorithm validation (section 8.4). The API is bearer-only with no browser-automatically attached credential fallback; that assumption, not JSON or JWT format, justifies disabling CSRF here. The fallback intentionally supplies no login UI. Add any public/probe exceptions deliberately.
+
+### 10.2 A user was loaded. Why is authentication not complete?
+
+**Answer:** `UserDetailsService` performs lookup; a password provider verifies the presented password with `PasswordEncoder` and checks account status.
+
+```java
+boolean matches = encoder.matches(presentedPassword, storedEncodedPassword);
+```
+
+**Scenario:** a custom provider returns a two-argument username/password token without validation. That is not successful authentication. Prefer the supported provider; never log passwords or compare newly salted hash strings.
+
+### 10.3 When roles are supplied in a JWT, why might the API return 403?
+
+**Answer:** role assignment, token validation and Spring authority conversion are distinct. Roles may instead be application-managed or hybrid; a JWT need not contain them.
+
+**Scenario:** the issuer supplies `roles: ["ADMIN"]`, but the application checks `hasRole("ADMIN")`, which conventionally requires `ROLE_ADMIN`. Default scope mapping commonly produces `SCOPE_...`, not that role.
+
+```java
+JwtGrantedAuthoritiesConverter roles = new JwtGrantedAuthoritiesConverter();
+roles.setAuthoritiesClaimName("roles");
+roles.setAuthorityPrefix("ROLE_");
+JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
+converter.setJwtGrantedAuthoritiesConverter(roles);
+http.oauth2ResourceServer(resource -> resource.jwt(jwt ->
+        jwt.jwtAuthenticationConverter(converter)));
+```
+
+This replaces default scope conversion; combine explicitly if both are required. Trust only validated claims. Correct mapping still does not override resource/tenant restrictions. A 403 can also reflect CSRF or another denial; inspect the actual path.
+
+### 10.4 Does `@PreAuthorize` replace resource authorization?
+
+**Answer:** no. Enable method security explicitly. Proxy-based checks require a call through the proxy; self-invocation bypasses that interception.
+
+```java
+@PreAuthorize("hasAuthority('SCOPE_orders.read')")
+public OrderView read(Long id) {
+    return loadAuthorizedOrder(id);
+}
+```
+
+**Scenario:** `orders.read` permits a capability, but `loadAuthorizedOrder` must still enforce ownership/tenant policy using trusted identity. A call to `this.read(id)` does not gain proxy interception.
+
+### 10.5 Why does a custom login work only for the current request?
+
+**Answer:** setting `SecurityContextHolder` establishes current-thread identity, not necessarily persisted session authentication. Use the configured session-authentication and context-save flow.
+
+**Scenario:** the next request is anonymous because the context was never saved. Prefer standard login handling. Conversely, bearer Resource Server authentication normally validates each request without persisting an HTTP authentication session.
+
+### 10.6 How should Spring handle CORS and CSRF for an SPA?
+
+The full explanation now lives in [Browser security: visualize CORS, CSRF and XSS](Authentication-Authorization-Patterns.md#10-browser-security-visualize-cors-csrf-and-xss), including diagrams, request flows, defensive snippets and verification cases.
+
+**Spring recall:** integrate CORS for trusted origins; preserve appropriate CSRF protection for automatically attached credentials. Use the version-specific SPA token lifecycle recipe. Do not solve browser failures with `permitAll` or unexplained `csrf.disable()`.
+
+### 10.7 Why does REST advice not format authentication failures?
+
+**Answer:** security can reject before MVC. Use `AuthenticationEntryPoint` and `AccessDeniedHandler` for the relevant security mechanism.
+
+**Scenario:** missing/invalid bearer credentials normally yield 401; insufficient authority normally yields 403. Preserve applicable `WWW-Authenticate` semantics when customizing responses, avoid sensitive diagnostics and distinguish CSRF failures from permission failures.
+
+### 10.8 Which tests prove security beyond mocked permissions?
+
+**Answer:** test policy and credential validation separately, then cover their integration.
+
+```java
+mockMvc.perform(get("/api/orders/123")
+        .with(jwt().authorities(
+                new SimpleGrantedAuthority("SCOPE_orders.read"))))
+        .andExpect(status().isOk());
+```
+
+**Scenario:** this passes with an existing permitted-order fixture, but proves no signature, issuer or audience validation: the helper supplies an authenticated principal. Add actual signed fixture tokens through the Authorization header with isolated test keys, plus wrong-audience/issuer, expiry, invalid-signature, missing-credential and cross-tenant cases. Test chain gaps and browser protections as applicable.
+
+## References and historical cautions
+
+The PDF's fixed filter list, adapter-based configuration and universal session-default claims are historical. Provider `null` means deferral, not successful authentication; `STATELESS` does not mean cookie-free; "no cookies = no CSRF" is not a sufficient rule. Exact defaults and SPA recipes are version-dependent.
+
+- [Servlet architecture](https://docs.spring.io/spring-security/reference/servlet/architecture.html)
 - [Authentication architecture](https://docs.spring.io/spring-security/reference/servlet/authentication/architecture.html)
 - [Session/context management](https://docs.spring.io/spring-security/reference/servlet/authentication/session-management.html)
 - [CSRF](https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html)
 - [CORS](https://docs.spring.io/spring-security/reference/servlet/integrations/cors.html)
-- [JWT resource servers](https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html)
+- [JWT Resource Server](https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html)
+- [Opaque-token Resource Server](https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/opaque-token.html)
+- [OAuth2 Login](https://docs.spring.io/spring-security/reference/servlet/oauth2/login/core.html)
 - [Method security](https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html)
-- [Spring Security testing](https://docs.spring.io/spring-security/reference/servlet/test/index.html)
-- [Spring AI / MCP](https://docs.spring.io/spring-ai/reference/index.html)
-
-These links track current documentation. Match Security 6/7 APIs and defaults to the actual Boot/framework generation before using a recipe.
+- [Testing](https://docs.spring.io/spring-security/reference/servlet/test/index.html)
+- [Security 6.5 preparation for 7](https://docs.spring.io/spring-security/reference/6.5/migration-7/configuration.html)

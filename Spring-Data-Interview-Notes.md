@@ -116,7 +116,120 @@ Inherited CRUD methods have default transaction settings in the JPA implementati
 - Size connection pools, keep transactions short, inspect indexes/query plans, and distinguish first-level persistence-context caching from optional second-level caches.
 - Test concurrent updates and migrations; an ORM abstraction does not remove database-specific behavior.
 
-## 7. JDBC and exception translation
+## 7. Exception handling with Spring Data JPA and Hibernate
+
+**Recall:** Hibernate performs persistence; Spring translates supported persistence failures and manages transactions; application code decides recovery; REST advice decides the HTTP response. These are separate responsibilities.
+
+Use the Spring Data JPA + Hibernate stack for these examples. The underlying JPA concepts remain persistence context, flush, commit, entity state and locking; learning Spring does not require relearning those concepts as repository method names.
+
+### Where the failure crosses a boundary
+
+```text
+REST controller
+    -> transactional service proxy begins/joins transaction
+        -> service invokes Spring Data repository proxy
+            -> JPA EntityManager -> Hibernate -> JDBC/database
+        <- repository may translate a failure into DataAccessException
+    <- service transaction completes; flush/commit can also fail here
+<- exception reaches caller / MVC exception advice
+```
+
+This is not a mandatory chain for every exception. Repository integration translates supported exceptions crossing its boundary. `JpaTransactionManager` and its JPA dialect also handle supported transaction-completion failures. Other failures can surface as transaction exceptions or provider exceptions depending on their origin and configuration.
+
+`DataAccessException` is an unchecked Spring hierarchy with the underlying cause retained. It reduces application coupling to provider/JDBC exception types; it does not make every failure retryable or classify every database constraint as a business conflict.
+
+### Recognize categories, not just class names
+
+| Failure | Typical Spring-facing category | Application decision |
+| --- | --- | --- |
+| Unique, foreign-key or not-null constraint failure | `DataIntegrityViolationException` | Identify the known constraint/invariant; unexpected violations may be defects |
+| Stale version / optimistic update failure | `OptimisticLockingFailureException`, often a more specific JPA subclass | Report conflict or rerun a safe operation using fresh state |
+| Lock acquisition / pessimistic locking failure | `CannotAcquireLockException` / `PessimisticLockingFailureException` | Consider bounded whole-transaction retry after examining the cause |
+| Connectivity/resource failure | A resource-failure or transaction-creation exception | Distinguish inability to start from an unknown commit outcome |
+| Invalid persistence API use | `InvalidDataAccessApiUsageException` for supported translations | Fix the programming/configuration error, not blind retry |
+| Unexpected rollback of a participating transaction | `UnexpectedRollbackException` | Find the earlier rollback-only cause; catching did not repair the transaction |
+
+Exact types depend on the Hibernate version, dialect, driver and stage of failure. For example, do not depend on every JPA duplicate-key violation becoming the JDBC-oriented `DuplicateKeyException`; `DataIntegrityViolationException` is commonly the useful broader category.
+
+Hibernate lazy-loading failures are a fetch/context-lifetime issue, not normally a bad HTTP request. Serialization may trigger them outside a repository boundary, so they need not arrive as a translated repository exception.
+
+### Sample: catch outside the transaction that can fail
+
+Assume `PurchaseOrder` is a mapped entity, `OrderRepository` extends `JpaRepository<PurchaseOrder, Long>`, and the database enforces a named unique constraint for the merchant checkout reference. These are illustrative separate classes in the scanned package; imports and domain implementations are omitted.
+
+```java
+@Service
+public class OrderWriter {
+    private final OrderRepository orders;
+
+    public OrderWriter(OrderRepository orders) {
+        this.orders = orders;
+    }
+
+    @Transactional
+    public Long create(CreateOrder command) {
+        PurchaseOrder order = orders.save(PurchaseOrder.from(command));
+        return order.getId();
+    }
+}
+```
+
+```java
+@Service
+public class OrderApplication {
+    private final OrderWriter writer;
+
+    public OrderApplication(OrderWriter writer) {
+        this.writer = writer;
+    }
+
+    public Long create(CreateOrder command) {
+        try {
+            return writer.create(command);
+        } catch (DataIntegrityViolationException failure) {
+            throw new OrderPersistenceRejectedException(
+                    "Order could not be persisted", failure);
+        }
+    }
+}
+```
+
+`OrderPersistenceRejectedException` is an application `RuntimeException` with a `(String, Throwable)` constructor, preserving the original cause. It is not automatically an HTTP 409.
+
+**Why two beans?** In this example `OrderApplication` has no surrounding transaction; its call goes through another bean's transaction proxy. The `try/catch` surrounds both method execution and transaction completion. A `try/catch` inside `OrderWriter.create()` around `save()` alone can miss an error raised when its proxy commits after the method returns.
+
+This wrapper illustrates timing, not a requirement to wrap every Spring exception. Only translate when your layer adds meaningful semantics. A recognized checkout uniqueness constraint can become `OrderConflictException`; a missing required column or unrelated foreign-key failure must not be relabelled as that conflict. Classify using supported constraint/cause metadata for the chosen stack, not brittle parsing of human-readable SQL messages.
+
+If an outer caller already has a transaction, `REQUIRED` joins it and completion moves to that outer boundary. The catch above then does not surround the final commit. Draw the actual transaction boundary before deciding where to handle failures.
+
+### Flush, rollback and retry
+
+`saveAndFlush()` can expose failures earlier, but **flush is not commit**. Deferred constraints and transaction completion can still fail later. Flushing also changes SQL timing/batching; do not add it everywhere just to make exceptions easier to catch.
+
+After a Hibernate persistence failure, roll back and discard the failed persistence context rather than attempting to repair it with `clear()` or continuing more queries. A rollback-only transaction can produce `UnexpectedRollbackException` even if an earlier exception was caught.
+
+Retry a genuinely retryable operation **around a fresh transaction**, not repeatedly inside the failed one. Re-read state and repeat the complete unit of work. Bound attempts/time, add backoff where appropriate, and exclude non-idempotent external effects. Losing a connection during commit can leave an unknown outcome; a retry then needs operation identity/reconciliation, not just a transient-exception catch.
+
+### From persistence failure to REST response
+
+For a recognized business conflict, an application exception can propagate to shared REST advice:
+
+```java
+@RestControllerAdvice
+public class OrderErrors {
+    @ExceptionHandler(OrderConflictException.class)
+    public ResponseEntity<ProblemDetail> conflict(OrderConflictException failure) {
+        ProblemDetail body = ProblemDetail.forStatusAndDetail(
+                HttpStatus.CONFLICT, "The order conflicts with existing state.");
+        body.setProperty("code", "ORDER_CONFLICT");
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+    }
+}
+```
+
+This is Spring Framework 6+ response handling, not transaction management. A generic integrity failure is not automatically mapped by this handler. Preserve technical causes in protected diagnostics, return safe details, and avoid logging the same failure at every layer.
+
+### JDBC supporting context
 
 `JdbcTemplate` manages JDBC resources and repetitive execution/error handling while application code supplies SQL, parameters and row mapping. A configured shared template can be used concurrently; application callbacks and mutable state still need care.
 
@@ -148,15 +261,368 @@ Do not hold a database transaction open while waiting for a long model call. Per
 
 AI-generated repository methods must still be reviewed for query semantics, parameter safety, fetch plans, authorization scope and pagination limits.
 
-## 10. Interview drills
+## 10. Interview questions: Spring Data JPA + Hibernate
 
-- Two repository writes succeed individually but must succeed together. Place the transaction boundary.
-- A caught inner exception still makes the outer commit fail. Explain rollback-only.
-- `save` returns a different instance. Explain merge and managed state.
-- `flush` succeeds, then another operation fails. Explain why flush was not commit.
-- A list endpoint executes hundreds of queries. Diagnose N+1 and choose a fetch strategy.
-- Two clients overwrite each other's updates. Discuss optimistic locking and constraints.
-- A transaction contains a model call and a database write. Explain why the remote action is not atomically rolled back.
+Answer from persistence semantics and failure boundaries, not annotation recall. Samples omit imports, entity mappings and unrelated domain code; they illustrate the stated Spring proxy-based transaction arrangement, not an application executed in this repository.
+
+### 10.1 What does Spring Data add to a JPA application?
+
+**Answer:** repository proxies, common CRUD implementations and query machinery over JPA. Hibernate remains the ORM provider; Spring ORM/transaction infrastructure integrates resource lifecycle and exception translation. Database constraints and JPA persistence-context semantics still apply.
+
+**Scenario:** a derived repository query removes handwritten DAO code, but its association traversal can still cause N+1 queries. Less boilerplate is not a new consistency model or automatic performance guarantee.
+
+**Sample:** Spring supplies this repository's implementation; Hibernate executes the JPA work underneath it.
+
+```java
+public interface OrderRepository extends JpaRepository<PurchaseOrder, Long> {
+    List<PurchaseOrder> findByStatus(OrderStatus status);
+}
+```
+
+Across the following independent snippets, assume mapped domain types, injected collaborators and application exceptions with the indicated constructors. Methods annotated `@Transactional` are called through a Spring proxy, not self-invoked. `entityManager` denotes an injected `@PersistenceContext` EntityManager. These are reference fragments, not one copy-paste application.
+
+### 10.2 Two repository writes must succeed together. Where is the boundary?
+
+**Answer:** put one coherent service operation under an outer transaction. Repository-local transactions alone do not make separately invoked writes atomic.
+
+```java
+@Transactional
+public void transferStock(Long source, Long target, int quantity) {
+    Stock from = stocks.findById(source).orElseThrow(StockNotFoundException::new);
+    Stock to = stocks.findById(target).orElseThrow(StockNotFoundException::new);
+    from.remove(quantity);
+    to.add(quantity);
+}
+```
+
+**Scenario:** both entities are managed in this transaction; dirty checking persists changes without mandatory extra `save()` calls. An unchecked failure rolls back under ordinary defaults. Concurrent transfers still need suitable locking/invariant protection; the transaction annotation alone does not prevent lost updates.
+
+### 10.3 `save()` returned successfully. Is the order safely stored?
+
+**Answer:** not necessarily. SQL may run immediately or be deferred until flush; commit happens at the enclosing transaction boundary. Even a generated ID does not prove commit succeeded.
+
+**Scenario:** Hibernate queues an INSERT; a uniqueness violation appears at commit after the service method body returns. Catch around the transactional proxy call, as in section 7, rather than assuming a catch around `save()` sees everything.
+
+**Example timing:**
+
+```text
+Caller -> transaction proxy -> writer.create()
+                                  -> save() returns
+                                  -> method returns
+                            -> flush/commit fails
+Caller receives exception, not the method's successful return value.
+```
+
+For code, reuse section 7's `OrderApplication -> OrderWriter` sample: the non-transactional caller surrounds the transaction proxy invocation with its catch.
+
+### 10.4 `save()` returns another instance. Why?
+
+**Answer:** Spring Data's new-entity detection selects persist versus merge. Merge copies state into a managed instance and returns it; the supplied detached instance is not made managed by that operation.
+
+**Scenario:** use `PurchaseOrder managed = orders.save(detached);` and reason about which instance is tracked. Do not equate merge with a partial HTTP patch; copying stale or omitted fields can overwrite state. Prefer loading the managed entity and applying explicitly allowed changes.
+
+**Sample:** for an existing detached entity, merge returns the tracked copy.
+
+```java
+@Transactional
+public void changeNote(PurchaseOrder detached) {
+    PurchaseOrder managed = orders.save(detached);
+    managed.setNote("Tracked change");
+    // A later change to detached is not automatically tracked.
+}
+```
+
+Here the supplied entity is detached and repository new-detection identifies it as existing. This is merge behavior, not a claim that every `save()` returns a different instance.
+
+### 10.5 Flush succeeded. Can a later failure still undo the writes?
+
+**Answer:** yes. Flush synchronizes SQL inside the transaction; it does not complete the transaction. A later rollback can undo transactional writes, although sequence allocation and external effects are not necessarily reversible.
+
+**Scenario:** `saveAndFlush()` succeeds, then another invariant fails with an unchecked exception. The transaction rolls back. A test asserting SQL execution or an assigned ID is not a test of committed state.
+
+**Sample:** an intentional failure after SQL has executed.
+
+```java
+@Transactional
+public void demonstrateRollback(CreateOrder command) {
+    orders.saveAndFlush(PurchaseOrder.from(command));
+    throw new IllegalStateException("Demonstration: abort after flush");
+}
+```
+
+After the proxy rolls back, query from a new transaction to verify that this order was not committed. This deliberately failing method is a teaching example, not production business logic.
+
+### 10.6 Does exception translation mean every failure becomes the same exception?
+
+**Answer:** no. Spring maps supported failures into categories while retaining the cause. The actual boundary matters: repository invocation and transaction completion have different integration paths; a serialization-time lazy failure is elsewhere.
+
+**Scenario:** a unique constraint commonly yields `DataIntegrityViolationException`, while a stale version can yield an optimistic-locking category. A handler matching one provider exception only may miss the translated exception; a catch for every `DataAccessException` that returns 409 misclassifies outages and programming errors.
+
+**Sample:** a custom JPA DAO can participate in configured translation too; it does not have to extend a Spring Data interface.
+
+```java
+@Repository
+public class OrderDao {
+    @PersistenceContext
+    private EntityManager entityManager;
+
+    public void insertAndFlush(PurchaseOrder order) {
+        entityManager.persist(order);
+        entityManager.flush();
+    }
+}
+```
+
+With persistence-exception translation infrastructure configured (normally supplied in the Boot JPA setup), a supported provider failure escaping this proxied repository can be translated. The caller must supply the transaction. `@Repository` alone does not install all that infrastructure.
+
+### 10.7 Should every integrity violation return HTTP 409?
+
+**Answer:** no. Map a known invariant to a deliberate application contract; diagnose unknown violations as possible defects. Do not expose SQL, constraint internals or another user's record through error details.
+
+**Scenario:** duplicate merchant checkout reference can mean conflict or replay of an idempotent request. A not-null violation caused by a broken server mapping is not the same business condition. Database constraints enforce correctness under concurrency even if a friendly precheck exists.
+
+**Example database invariant:**
+
+```sql
+ALTER TABLE purchase_order
+ADD CONSTRAINT uk_order_merchant_checkout
+UNIQUE (merchant_id, checkout_reference);
+```
+
+Assume both columns are required/non-null in the schema. Only a recognized violation of this constraint should enter the duplicate-checkout policy. Unrelated constraints remain different failures. Constraint-name extraction is provider-specific; do not assume `failure.getMessage().contains(...)` is a reliable classifier.
+
+### 10.8 Why does commit fail after I caught the inner exception?
+
+**Answer:** an inner `REQUIRED` participant can mark the shared transaction rollback-only. Catching its exception in the outer method does not restore committability; the outer completion can raise `UnexpectedRollbackException`.
+
+**Scenario:** an inner repository write fails, the service catches it and writes an audit row in the same transaction. Both participate in a doomed transaction. If an independent failure audit is required, use a deliberately separate transaction through another proxy after considering pool usage and failure policy; do not assume self-invoked `REQUIRES_NEW` works.
+
+**Sample: reproduce rollback-only without depending on a database error.** These methods belong to separate Spring beans:
+
+```java
+// InnerWork
+@Transactional
+public void run() {
+    throw new IllegalStateException("Inner operation failed");
+}
+```
+
+```java
+// OuterWork: innerWork is an injected InnerWork proxy.
+@Transactional
+public void run() {
+    try {
+        innerWork.run();
+    } catch (IllegalStateException failure) {
+        log.warn("Inner failure caught; shared transaction is still doomed", failure);
+    }
+}
+```
+
+Under the ordinary `REQUIRED`/rollback policy, the inner proxy marks the shared transaction rollback-only. The outer proxy then fails completion with `UnexpectedRollbackException`. This catch is intentionally an anti-pattern demonstration, not successful recovery.
+
+### 10.9 How do you retry a deadlock or optimistic-lock conflict safely?
+
+**Answer:** first decide whether rerunning the business operation is valid. Retry the whole unit of work with a new transaction and fresh state, not just the failed SQL or the same managed objects. A user edit conflict may need user reconciliation rather than automatic overwrite.
+
+```java
+// OrderApplication is non-transactional; writer is a separate proxied bean.
+public void reserve(ReserveCommand command) {
+    for (int attempt = 1; attempt <= 2; attempt++) {
+        try {
+            writer.reserve(command);
+            return;
+        } catch (OptimisticLockingFailureException failure) {
+            if (attempt == 2) {
+                throw failure;
+            }
+        }
+    }
+}
+```
+
+**Scenario:** `writer.reserve()` is transactional, loads current stock and rechecks availability every attempt; it has no remote side effects. The first call has completed rollback before retry begins. This minimal bounded sample omits production backoff/telemetry; it assumes no caller transaction. A broad retry on all data-access failures would include nonretryable constraints and potentially unknown commit outcomes.
+
+### 10.10 What exactly does optimistic locking protect?
+
+**Answer:** a mapped version lets the provider detect conflicting updates instead of silently overwriting another transaction's work. It does not enforce every cross-row invariant, and bulk operations must deliberately preserve equivalent concurrency checks.
+
+**Scenario:** two requests load version 7; the first commits version 8, the second fails its version check. Report conflict or rerun a safe intent using fresh state. Do not simply copy the old user snapshot over version 8 and call that recovery.
+
+**Sample entity fragment and concurrent timeline:**
+
+```java
+@Version
+private Long version;
+```
+
+```text
+Transaction A reads order 123 at version 7.
+Transaction B reads order 123 at version 7.
+A changes status and commits -> database version 8.
+B changes status and flushes -> version 7 no longer matches.
+```
+
+Conceptually, B attempts:
+
+```sql
+UPDATE purchase_order
+SET status = ?, version = 8
+WHERE id = 123 AND version = 7;
+```
+
+Zero matching rows signal stale state in this versioned-update example. This is the category you may remember as OpenJPA optimistic verification failure; Hibernate/JPA and Spring expose their corresponding exception categories. **Multiple changes to the same managed entity within one transaction are normal**, not automatically a version conflict.
+
+### 10.11 When would you use pessimistic locking instead?
+
+**Answer:** when deliberate contention control is worth blocking and locks fit the database access pattern. Keep transactions short, use consistent lock order, and plan for timeouts/deadlocks. A pessimistic lock is not permission to hold a transaction during a slow network call.
+
+**Scenario:** reserve scarce stock under high contention. Compare an atomic conditional update, optimistic versioning and a row lock based on measured conflicts. If the atomic update affects zero rows, distinguish insufficient stock/missing resource according to the contract.
+
+**Sample:** repository lock plus a service transaction that owns its duration.
+
+```java
+public interface StockRepository extends JpaRepository<Stock, Long> {
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select s from Stock s where s.id = :id")
+    Optional<Stock> findForUpdate(@Param("id") Long id);
+}
+```
+
+```java
+@Transactional
+public void reserve(Long stockId, int quantity) {
+    if (quantity <= 0) {
+        throw new IllegalArgumentException("Quantity must be positive");
+    }
+    Stock stock = stocks.findForUpdate(stockId)
+            .orElseThrow(StockNotFoundException::new);
+    stock.reserve(quantity);
+}
+```
+
+`Stock.reserve()` enforces available quantity. The database lock is normally held until transaction completion, not just until the repository method returns. Lock timeout support and behavior depend on the database/provider.
+
+### 10.12 Why does a REST response trigger a lazy-loading exception?
+
+**Answer:** the serializer traverses an unloaded association after the relevant persistence context has closed. The issue is the loading/DTO boundary, not the frontend's JSON or a missing exception annotation.
+
+**Scenario:** return a DTO assembled from an intentional fetch plan inside the service transaction. Open EntityManager in View may allow late queries but can hide N+1 costs. Disabling laziness everywhere replaces one problem with overfetching and does not define a clean API.
+
+**Sample:** initialize only what the DTO needs while the context is active.
+
+```java
+public record OrderDetails(Long id, String customerName) { }
+```
+
+```java
+@Transactional(readOnly = true)
+public OrderDetails details(Long id) {
+    PurchaseOrder order = orders.findById(id)
+            .orElseThrow(OrderNotFoundException::new);
+    return new OrderDetails(order.getId(), order.getCustomer().getName());
+}
+```
+
+The customer access may issue another query here, but it happens within the transaction. Returning this scalar DTO avoids later lazy traversal by Jackson. For a list, use an intentional bulk fetch/projection rather than repeating this access per row.
+
+### 10.13 How do you diagnose an endpoint issuing hundreds of queries?
+
+**Answer:** inspect SQL/query counts and association access, then choose projections, fetch joins, entity graphs or batching for that use case. Test pagination and result correctness, not just the absence of exceptions.
+
+**Scenario:** an order list reads each customer's name and every line item. Avoid blindly fetching multiple collections or paginating collection joins; SQL row multiplication can distort paging and memory usage. A dedicated list DTO query may be the simplest solution.
+
+**Sample:** a bounded DTO query for a list screen; use a fully qualified DTO name in JPQL.
+
+```java
+// example.orders.OrderSummary
+public record OrderSummary(Long id, String customerName) { }
+```
+
+```java
+@Query("""
+        select new example.orders.OrderSummary(o.id, c.name)
+        from PurchaseOrder o join o.customer c
+        order by o.id
+        """)
+Slice<OrderSummary> findSummaries(Pageable pageable);
+```
+
+Call with a validated bounded page size, for example `PageRequest.of(0, 20)`. This selects the customer name in the query and returns no lazy entity association to serialize. It does not retrieve line items; a detail view needs its own plan. Verify generated SQL/query counts rather than assuming a projection fixes every query.
+
+### 10.14 Can an HTTP failure undo a payment or model call?
+
+**Answer:** no. A local JPA transaction controls its database resource, not a remote provider. Do not keep it open during a long call just to create an illusion of atomicity.
+
+**Scenario:** persist intent, invoke a provider using a stable operation reference, then persist outcome in a separate boundary. Coordinate committed events with an outbox where required and reconcile uncertain remote outcomes. REST advice describes the failure; it is not compensation.
+
+**Example workflow:**
+
+```text
+Transaction 1: save payment intent + outbox work; commit.
+Worker: call provider with the intent's stable idempotency reference.
+Transaction 2: record confirmed outcome + next outbox event; commit.
+Timeout: query/reconcile provider outcome before treating it as failure.
+```
+
+A crash between the provider's success and transaction 2 requires reconciliation or a safe repeat against the same provider reference. It is not repaired by putting the entire worker under one local JPA transaction.
+
+### 10.15 How do you prove flush/commit and concurrent-failure behavior?
+
+**Answer:** use the production database engine and real transaction boundaries. A rollback-by-default test can pass without ever exercising commit. Mocks cannot prove constraints, Hibernate SQL or database locking.
+
+**Scenario:** a duplicate-checkout test runs through the service proxy with no enclosing test transaction, observes failure, then verifies committed state in a new transaction. A concurrent version test uses separate transactions/persistence contexts and coordinated execution. Run the actual migrations; assert the intended category/invariant rather than vendor error-message text.
+
+**Sample test skeleton:** `writer.create()` is the transactional method from section 7. Use a configured production-engine test database and actual migrations.
+
+```java
+@SpringBootTest
+class OrderCommitTests {
+    @Autowired
+    private OrderWriter writer;
+
+    @Autowired
+    private OrderRepository orders;
+
+    @Test
+    void duplicateCheckoutDoesNotCreateAnotherOrder() {
+        CreateOrder command = validOrderWithFreshCheckoutReference();
+        Long originalId = writer.create(command);
+
+        assertThatThrownBy(() -> writer.create(command))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThat(orders.findById(originalId)).isPresent();
+        assertThat(orders.countByMerchantIdAndCheckoutReference(
+                command.merchantId(), command.checkoutReference()))
+                .isEqualTo(1L);
+    }
+}
+```
+
+There is deliberately no test-level `@Transactional`; each writer call completes its transaction. The fixture helper creates a unique valid command, and the repository declares the shown count query. This test assumes the selected stack translates this named uniqueness violation into that Spring category; establish that against the actual provider/database. Use isolated fixtures/cleanup. Do not claim this sequential test proves concurrent duplicate handling.
+
+### 10.16 Where should technical translation end and domain meaning begin?
+
+**Answer:** keep Hibernate/JDBC details near persistence integration; let the application translate recognized failures into meaningful outcomes, retaining causes. A shared REST handler maps application failures to status plus stable code. Do not invent a domain wrapper for every technical exception without adding semantics.
+
+**Scenario:** `OrderConflictException` maps to a safe 409; an unrecognized persistence defect remains an internal error with correlated diagnostics. A dependency outage may warrant a service-unavailable policy, but the client must not be told a write definitely failed if its commit outcome is unknown.
+
+**Example translation policy:**
+
+```text
+Known checkout-uniqueness violation
+    -> replay existing result OR OrderConflictException (per API contract)
+    -> REST advice: safe response + stable code
+
+Unknown integrity failure
+    -> preserve diagnostic cause; investigate mapping/data invariant
+    -> generic internal-error policy, not automatic 409
+```
+
+Reuse section 7's `OrderErrors` handler for the HTTP sample. The classification step belongs before that handler; the handler must not guess business meaning by inspecting arbitrary SQL error strings.
+
+**Interview recall:** identify the transaction owner, the SQL/flush/commit stage, the translated failure category, the remaining state, and whether retry is safe. Then explain the HTTP contract. Those mechanisms matter more than memorizing Hibernate exception names.
 
 ## Change references
 
