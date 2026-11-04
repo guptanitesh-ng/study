@@ -550,6 +550,21 @@ Slice<OrderSummary> findSummaries(Pageable pageable);
 
 Call with a validated bounded page size, for example `PageRequest.of(0, 20)`. This selects the customer name in the query and returns no lazy entity association to serialize. It does not retrieve line items; a detail view needs its own plan. Verify generated SQL/query counts rather than assuming a projection fixes every query.
 
+**Projection recall: DTO is the container; projection is the selected result shape.** The query above is a standard JPA constructor projection: it selects scalar values directly into an ordinary DTO/record, not a managed entity. This is not a Spring Data invention. Fetching an entity first and then mapping it to a DTO is different: the entity has already been loaded, and mapping may trigger lazy queries.
+
+Spring Data also supports **interface-based projections**:
+
+```java
+public interface OrderIdView {
+    Long getId();
+}
+
+// Inside the PurchaseOrder repository; assumes a String status property.
+List<OrderIdView> findByStatus(String status);
+```
+
+Spring Data supplies proxy instances implementing the interface; you do not implement it yourself. A closed projection like this exposes matching entity properties. Nested/open projections can have different loading costs: inspect SQL rather than assuming every projection fetches only a few columns or eliminates N+1.
+
 ### 10.14 Can an HTTP failure undo a payment or model call?
 
 **Answer:** no. A local JPA transaction controls its database resource, not a remote provider. Do not keep it open during a long call just to create an illusion of atomicity.
