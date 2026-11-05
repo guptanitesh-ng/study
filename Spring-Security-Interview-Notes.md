@@ -62,7 +62,7 @@ Do not assume arbitrary async threads inherit identity. Propagate context delibe
 
 Remember-me is persistent re-authentication, not an indefinitely valid session. Its cookies remain credentials requiring protection and lifecycle policy.
 
-Spring logout can clear context, invalidate the application session and remove configured cookies. With CSRF protection, the state-changing logout action is normally POST. Application logout, provider logout and access/refresh-token revocation are separate decisions: see [credential lifecycle](Authentication-Authorization-Patterns.md#7-lifecycle-and-optional-gateway-hybrid).
+Spring logout can clear context, invalidate the application session and remove configured cookies. With CSRF protection, the state-changing logout action is normally POST. Application logout, provider logout and access/refresh-token revocation are separate decisions: see [the logout and token-replay scenario](Authentication-Authorization-Patterns.md#93-i-copied-the-token-into-postman-what-happens-after-logout).
 
 ## 6. CORS: browser permission, not authorization
 
@@ -216,7 +216,7 @@ public OrderView read(Long id) {
 
 ### 10.6 How should Spring handle CORS and CSRF for an SPA?
 
-The full explanation now lives in [Browser security: visualize CORS, CSRF and XSS](Authentication-Authorization-Patterns.md#10-browser-security-visualize-cors-csrf-and-xss), including diagrams, request flows, defensive snippets and verification cases.
+The full explanation now lives in [Browser security: why CORS, CSRF and XSS happen](Authentication-Authorization-Patterns.md#10-browser-security-why-cors-csrf-and-xss-happen), including diagrams, request flows, defensive snippets and verification cases.
 
 **Spring recall:** integrate CORS for trusted origins; preserve appropriate CSRF protection for automatically attached credentials. Use the version-specific SPA token lifecycle recipe. Do not solve browser failures with `permitAll` or unexplained `csrf.disable()`.
 

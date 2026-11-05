@@ -30,11 +30,22 @@ JSON versus HTML does not decide the pattern. A React frontend can use a backend
 
 ## 2. Pattern A: application-owned login and server session
 
-```text
-Browser submits credentials -> backend verifies password against user store
-    -> establishes authenticated server session
-    -> browser receives session cookie
-Later request + cookie -> restore identity -> authorize -> business operation
+```mermaid
+sequenceDiagram
+    actor User
+    participant Browser
+    participant Backend
+    participant Users as User store
+    participant Sessions as Shared session store
+    User->>Browser: Enter application credentials
+    Browser->>Backend: Submit login over HTTPS with required CSRF proof
+    Backend->>Users: Look up account and verify password hash
+    Backend->>Sessions: Establish authenticated session; rotate session ID
+    Backend-->>Browser: Set protected session cookie
+    Browser->>Backend: Next request with cookie, possibly to another pod
+    Backend->>Sessions: Restore identity from session ID
+    Backend->>Backend: Check operation and resource permission
+    Backend-->>Browser: Permitted response
 ```
 
 **Example:** an internal order-management tool owns its accounts. After login, the browser sends a session identifier, not the password or an API access token on every request.
@@ -45,21 +56,43 @@ With multiple pods, choose shared session storage or a deliberate routing/sessio
 
 **Failure scenario:** login succeeds on pod A, but the next request reaches pod B, which has no session state. The symptom looks like intermittent logout; the missing design is session-state availability, not JWT decoding.
 
+| Interviewer follow-up | Practical answer cue |
+| --- | --- |
+| "Does the browser keep sending the password?" | No; it sends the session cookie. Store an adaptive password hash, not recoverable plaintext. |
+| "Why change the session ID at login?" | Prevent an attacker-chosen pre-login ID from becoming the authenticated session: session fixation protection. |
+| "Why does login work but POST fail?" | Check CSRF delivery and authorization separately. A valid session bypasses neither; do not disable protection merely to clear a 403. |
+| "How does logout or account disablement take effect?" | Invalidate relevant server sessions and enforce current account policy. Clearing one cookie does not invalidate a copied session; distinguish idle and absolute lifetime. |
+
 [Spring implementation: section 8.2](Spring-Security-Interview-Notes.md#82-pattern-a-application-owned-login-and-server-session).
 
 ## 3. Pattern B: external OIDC login with a backend session
 
-```text
-Browser -> backend -> redirect to trusted identity provider
-    -> user authenticates there, possibly with MFA
-    -> provider redirects authorization code to backend callback
-    -> backend exchanges code and validates ID token + login correlation
-    -> backend establishes its own authenticated session
-Browser -> backend with application session cookie
-Backend -> downstream API with access token, when required
+```mermaid
+sequenceDiagram
+    actor User
+    participant Browser
+    participant Backend as Application backend / BFF
+    participant IdP as Google or enterprise identity provider
+    participant API as Downstream API
+    Browser->>Backend: Start external login
+    Backend->>Backend: Save login correlation and PKCE verifier
+    Backend-->>Browser: Redirect to trusted provider
+    User->>IdP: Sign in; complete MFA if required
+    IdP-->>Browser: Redirect with authorization code and state
+    Browser->>Backend: Callback
+    Backend->>IdP: Redeem code with verifier and configured client authentication
+    IdP-->>Backend: ID token and access token; refresh token if issued
+    Backend->>Backend: Validate login evidence; map identity; create session
+    Backend-->>Browser: Application session cookie
+    Browser->>Backend: Later request with cookie
+    Backend->>API: Access token if downstream access is needed
+    API-->>Backend: Authorized response
+    Backend-->>Browser: Application response
 ```
 
 **Example:** an employee signs into the order portal using enterprise SSO. The identity provider performs login/MFA. The portal establishes its own session and checks which orders that employee can access.
+
+**Familiar example:** "Sign in with Google" is Pattern B when the callback ends in an application session cookie. Google's cookie and the application's cookie are separate. The button alone does not identify the pattern: browser-held API tokens indicate a Pattern C-style flow.
 
 In a backend-for-frontend (BFF) arrangement, access/refresh tokens stay server-side rather than being exposed to browser JavaScript. The browser still holds a sensitive session cookie; this is not immunity to CSRF, XSS or session theft.
 
@@ -95,6 +128,13 @@ Central role/entitlement or policy decision
 
 The portal may still need current domain data: "can read orders" does not mean "can read another tenant's order." Define freshness and failure policy for cached claims or remote decisions. Local session logout, identity-provider logout and downstream-token revocation are separate operations.
 
+| Interviewer follow-up | Practical answer cue |
+| --- | --- |
+| "Does Google decide which orders I can access?" | It establishes identity; application membership/ownership still decides access. Provider roles contribute only if deliberately mapped. |
+| "Can we link an existing account just by matching email?" | Do not blindly merge identities. Use trusted issuer/subject identity and a deliberate verified account-linking flow; email can change or carry different assurance. |
+| "What must survive a pod switch during login?" | Saved correlation/verifier, then session and server-held authorized-client tokens. The callback can fail before normal API use begins. |
+| "Why am I signed in again after logout?" | The app session ended but the provider session may remain. Decide which login and credential layers to end. |
+
 [Spring implementation: section 8.3](Spring-Security-Interview-Notes.md#83-pattern-b-enterprise-oidc-login-with-a-backend-session).
 
 ## 4. Pattern C: SPA obtains a token and calls the resource server
@@ -107,6 +147,40 @@ SPA -> identity provider: authorization code + PKCE
 ```
 
 **Example:** a browser order dashboard calls an independently exposed order API. The SPA is a public OAuth client and cannot keep a client secret. The API is a resource server, not necessarily a login application.
+
+**Connection to your extracted flow:** the external-login path has this shape: the browser's authentication library obtains an API access token; the backend validates it directly, without issuing a replacement JWT or establishing a browser login session. This is a generalized recall example, not a reproduction of internal configuration or a live verification of that application.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant SPA as Browser and OAuth library
+    participant IdP as Identity provider
+    participant API as Protected API
+    participant Keys as Trusted provider JWKS
+    User->>SPA: Start sign-in
+    SPA->>IdP: Authorization request with code challenge and API scopes
+    IdP-->>SPA: Redirect with authorization code
+    SPA->>IdP: Redeem code with PKCE verifier
+    IdP-->>SPA: API access token
+    SPA->>API: Authorization header with bearer access token
+    opt Suitable public key is not cached
+        API->>Keys: Fetch from configured trusted provider
+        Keys-->>API: Public signing keys
+    end
+    API->>API: Verify signature, issuer, audience and time
+    API->>API: Map permissions; enforce resource policy
+    API-->>SPA: Response
+```
+
+```text
+Browser token cache / renewal    !=    backend public-key cache
+  holds user credentials              holds public verification keys
+  obtains another usable token        avoids repeated key downloads
+
+Neither cache makes an expired token valid or guarantees immediate revocation.
+```
+
+An application can also offer password login that issues its own JWT, particularly in isolated development/tests. **That is application-owned token login, not Pattern A as defined here:** A ends in a server session; this variant ends in a browser-held bearer token. Keep development modes explicitly gated, never a fallback after production identity validation fails. A locally issued token needs its own explicit validation policy; do not assume its checks equal those of an external issuer.
 
 Use an access token intended for that API, not an ID token intended for the SPA. Choose browser token storage/lifecycle deliberately: XSS can steal accessible tokens or act through the compromised application. Explicit bearer headers and no ambient-credential fallback differ from authentication cookies for CSRF analysis; token format alone does not decide CSRF policy. Cross-origin browser access also needs a deliberate CORS policy.
 
@@ -130,16 +204,31 @@ After signature verification, validate expected issuer, intended API audience, t
 
 **Failure scenario:** an identity provider rotates keys. An API with a valid cached old key may still verify existing tokens, while tokens signed by a new unknown key require successful key refresh. Outages do not justify bypassing validation.
 
+| Interviewer follow-up | Practical answer cue |
+| --- | --- |
+| "Where does the user's password go?" | To the provider in external login, not the protected API. Local password-token login is a separate issuer/trust design. |
+| "Do we need the private key or a client secret?" | APIs use public verification keys, never the issuer's private signing key. Browser clients cannot keep a confidential secret. |
+| "How do we recover an expired browser token?" | Let the library attempt supported silent acquisition; redirect when interaction is required. Surface other failures rather than creating redirect loops or retrying every 403 as login. |
+| "Why successful login followed by 401 or 403?" | Wrong audience/issuer or expiry can cause 401; a trusted identity without mapped permission can cause 403. Diagnose the actual failing stage; key retrieval errors can also be surfaced as authentication errors in some implementations. |
+| "Does a five-minute key cache mean a five-minute token?" | No. Key-cache policy and token expiry are independent; each request still needs validation. Local signature checks do not ask the provider about logout on every call. |
+
 [Spring implementation: section 8.4](Spring-Security-Interview-Notes.md#84-pattern-c-spa-obtains-a-token-and-calls-the-resource-server).
 
 ## 5. Pattern D: service-to-service client credentials
 
-```text
-Worker authenticates its application identity to authorization server
-    -> receives access token for intended API
-    -> calls order API
-    -> API validates token and application permissions
-    -> authorizes operation + resource
+```mermaid
+sequenceDiagram
+    participant Worker
+    participant IdP as Authorization server
+    participant API as Order API
+    Worker->>IdP: Authenticate workload; request application access to API
+    IdP-->>Worker: Access token for intended API
+    Worker->>Worker: Cache token until renewal is needed
+    Worker->>API: Authorization header with bearer access token
+    API->>API: Validate token and calling application identity
+    API->>API: Check application permissions and permitted resources
+    API-->>Worker: Authorized response
+    Note over Worker,IdP: On expiry, authenticate again for another token
 ```
 
 **Example:** a reconciliation worker reads orders without a user being logged in. Its token represents application identity, not user delegation.
@@ -148,11 +237,71 @@ Provision least-privilege application permissions. Use supported workload/federa
 
 **Failure scenario:** service A forwards a token intended only for A to service B. B must reject an unsuitable audience. Use the supported delegation/token-exchange flow when acting for a user, or application credentials when acting as the service; these represent different authority.
 
+| Interviewer follow-up | Practical answer cue |
+| --- | --- |
+| "Which user's permissions does the worker have?" | None inherently: it represents an application. Grant explicit application permissions and resource limits; do not invent a human user. |
+| "What if it must act on behalf of a user?" | Use supported delegation/token exchange for the downstream audience. Client credentials changes identity and is not an equivalent shortcut. |
+| "Must we keep a client secret?" | Prefer supported workload/federated identity or certificates where suitable. Otherwise provision and rotate secrets securely, outside frontend code and the repository. |
+| "Should every job obtain a new token?" | Reuse a protected token within validity; coordinate renewal and bound retries. Normally reacquire rather than use user-style refresh tokens. |
+| "Is an internal network enough to trust callers?" | No. Validate service identity/audience and enforce least privilege. Network controls complement authentication and authorization. |
+
 [Spring implementation: section 8.5](Spring-Security-Interview-Notes.md#85-pattern-d-service-to-service-client-credentials).
+
+### Managed identity: a practical Pattern D example
+
+**Familiar situation:** an Azure-hosted application reads a secret from Key Vault without a client secret in its configuration. It still uses an access token; the platform manages how the workload proves its identity to obtain one.
+
+```mermaid
+sequenceDiagram
+    participant App as Azure-hosted application
+    participant Identity as Azure Identity SDK and platform identity mechanism
+    participant Entra as Microsoft Entra ID
+    participant Vault as Key Vault
+    App->>Identity: Request token for Key Vault using managed identity
+    Identity->>Entra: Obtain token through platform-managed authentication
+    Entra-->>Identity: Access token intended for Key Vault
+    Identity-->>App: Access token
+    App->>Vault: Request with bearer access token
+    Vault->>Vault: Validate identity and assigned target permissions
+    Vault-->>App: Permit or deny secret access
+```
+
+This is the same **application acting as itself** model as Pattern D, not a claim that every platform identity mechanism uses identical client-credentials protocol steps.
+
+| Interviewer follow-up | Practical answer cue |
+| --- | --- |
+| "Does enabling managed identity grant access?" | No. Assign least-privilege target permissions, such as an appropriate Key Vault RBAC role. Authentication and authorization remain separate. |
+| "Can we reuse that token for Storage or our API?" | Request a token for the intended resource. A Key Vault token is not valid API access evidence for a different audience. |
+| "Can our custom API accept this identity?" | Configure trusted Entra token validation and explicitly authorize the application identity through suitable app roles or a deliberate access policy. |
+| "How does this relate to AKS Workload Identity?" | A Kubernetes service-account token is exchanged through a configured federation with an Entra application or user-assigned managed identity. Unlike a VM's managed-identity endpoint, the trust rests on the federated issuer, subject and audience configuration. |
+| "Which identity is used on my laptop?" | A credential chain may select a developer login rather than the deployed managed identity. Check the selected principal and its permissions; local success does not prove production access is configured. |
+
+**Recall:** managed identity removes the manually managed credential, not the access token or the need for permissions.
 
 ### Scaling does not depend on the header alone
 
-Locally validated access tokens remove the need for a pod-local authentication-session lookup. Shared-session applications also scale horizontally; their availability depends on the session repository. Opaque bearer tokens can require introspection. Authorization freshness and business data may still require shared state in all three arrangements.
+**Recall:** Pattern C with locally validated JWTs simplifies horizontal scaling of API authentication. Patterns A/B with server-side sessions need cross-pod access to the session state. This is a JWT-validation advantage, not a property of the `Authorization` header itself.
+
+```mermaid
+flowchart TD
+    Browser["Browser: next request may reach any pod"] -->|A/B: session cookie| SessionPod["Receiving pod reads session ID"]
+    SessionPod --> Store["Shared session store: user and session state"]
+    Browser -->|C: JWT bearer header| JWTPod["Receiving pod checks signature, issuer, audience and time"]
+    Keys["Trusted public keys cached on each pod"] --> JWTPod
+    Store --> Policy["Authorization and business operations"]
+    JWTPod --> Policy
+    Policy --> Data["Shared membership / business data where required"]
+```
+
+**The cookie is already sent by the browser.** What pod B must retrieve is the server-side state identified by that cookie, even if pod A created it. With a JWT, each pod can validate the carried evidence locally without a session lookup; all pods still need consistent trust configuration and suitable signing keys.
+
+| Design | Authentication dependency | Scaling trade-off |
+| --- | --- | --- |
+| A/B: server-side session | Shared session repository, such as Redis or a database | Scales horizontally, but adds a lookup and repository availability dependency |
+| C: locally validated JWT | Trusted keys and claim-validation configuration on each pod | No per-request session lookup; login, renewal and key refresh can still have external dependencies |
+| C: opaque bearer token | Token authority through introspection, possibly cached | No local session required, but validation depends on authority availability and cache policy |
+
+JWTs do not make the entire application stateless. Current membership, immediate disablement/revocation, distributed quotas and business data may still require shared state. Choose credential placement from browser-security and revocation requirements as well as scaling convenience.
 
 A BFF with shared sessions can deliberately trade a session-store dependency for keeping OAuth tokens out of browser JavaScript. Affinity is routing, not failover-safe persistence. Include authorization-request correlation state and server-side authorized-client tokens when designing OIDC session failover.
 
@@ -187,294 +336,204 @@ Both require protected transport/storage and no token logging. Both require auth
 
 [Spring JWT/opaque implementation comparison](Spring-Security-Interview-Notes.md#oauth-oidc-jwt-and-opaque-tokens-spring-integration).
 
-## 7. Lifecycle and optional gateway hybrid
-
-Logging out of an application session, ending the identity-provider session, revoking a refresh token and revoking an issued access token are separate operations. Deleting a browser token does not invalidate stolen copies.
-
-Refresh-token format is an authorization-server choice, not necessarily opaque. Storage, rotation/reuse detection where applicable, expiry and revocation policy matter more than shape. APIs should not accept refresh tokens or ID tokens as access tokens.
-
-A supported phantom-token arrangement can present opaque tokens externally and exchange/resolve them at a trusted gateway into short-lived internal JWTs:
-
-```text
-External opaque token -> trusted gateway/token service
-    -> internal JWT for intended API -> API validates -> resource checks
-```
-
-This needs explicit infrastructure support, authenticated/protected internal routing and enforcement against untrusted identity injection. Prevent external clients bypassing required edge policy. Cache policy and internal-token lifetime still bound revocation freshness. Configuring two token types does not create this architecture automatically.
-
-## 8. Interview recall
-
-Start with the application's trust boundaries and credential flow, then name the framework mechanism:
-
-> "The API accepts access tokens for its audience from a configured issuer. It verifies signatures using published public keys and validates claims, then checks the operation and tenant/resource relationship. Spring Resource Server supplies the token-validation pipeline; application authorization supplies the domain rules."
-
-OAuth describes how access is obtained; OIDC adds login identity; JWT/opaque describes token representation and validation. Remember the flow and invariants before memorizing internal classes.
-
 ## 9. Focused study plan: security decisions and defenses
 
-**Goal:** explain a plausible design, its limits and evidence of enforcement, without memorizing framework internals or presenting a proposed solution as past production experience. This is a plan for later topic-by-topic study, not a claim that the controls have been implemented or verified.
+Use these six conversations to recall **what goes wrong, why, where we fix it and how we know**. Follow the diagram, explain the normal solution, then defend it against the follow-ups. The running example is an order portal used by multiple tenants. These are preparation scenarios, not claims of production experience or completed tests.
 
-Use one running example: a multi-tenant order portal with enterprise login, an order API, a reconciliation worker and optional document-upload/notification features. Change one requirement at a time rather than introducing a different domain for every question.
+### 9.1 How would you secure a frontend calling our APIs?
 
-### 9.1 The practice contract
+```mermaid
+flowchart TD
+    Browser["Browser"] --> Choice{"Where should OAuth tokens live?"}
+    Choice -->|Pattern B| BFF["Backend holds tokens; browser sends session cookie"]
+    BFF --> API["API validates access token and resource permissions"]
+    Choice -->|Pattern C| SPA["SPA obtains access token using code + PKCE"]
+    SPA -->|Authorization header| API
+    IdP["Identity provider: login and token issuance"] -.-> BFF
+    IdP -.-> SPA
+```
 
-For every scenario, prepare the same five-part explanation:
+**Why it matters:** choosing where credentials live changes theft exposure, session operations and browser protections. Multiple pods alone do not force a JWT design.
 
-| Step | What to articulate |
+**Normal solution:** use a BFF when keeping OAuth tokens out of browser JavaScript is the priority; use direct SPA tokens when browser-to-API access is a deliberate requirement. Both need server-side authorization. Browser-specific failures and fixes belong in [section 10](#10-browser-security-why-cors-csrf-and-xss-happen), not a duplicate checklist here.
+
+| Interviewer follow-up | Answer cue |
 | --- | --- |
-| Attack/failure | What can go wrong, which asset is affected and under which assumptions? |
-| Trust boundary | Which input, credential, service, browser or tenant boundary is being crossed? |
-| Control | Where is the invariant enforced, using which trusted evidence? |
-| Trade-off | What latency, availability, usability, freshness or operational cost does the choice introduce? |
-| How to verify | Which positive, negative and failure-path checks would demonstrate the claimed boundary? |
-
-Then defend the design against a changed assumption: "What if the token is stolen?", "What if the next request reaches another pod?", or "What if this dependency is down?"
-
-**Session output:** one flow diagram, an explicit allow/deny invariant, the five-part explanation, an alternative with a reason for rejecting it, and proposed verification cases. Add configuration or code only when needed to make the enforcement point concrete. Do not invent test results.
-
-### 9.2 Study order and completion criteria
-
-| Pass | Focus | Ready to move on when you can... |
-| --- | --- | --- |
-| 1 | Identity, protocols and trust: scenarios A-B | Choose A/B/C/D, distinguish ID/access/refresh tokens and explain validation without class names |
-| 2 | Authorization: scenario C | Separate role ownership, capability checks and object/tenant enforcement |
-| 3 | Browser and credential lifecycle: scenarios D-F | Explain CSRF versus CORS versus XSS, theft exposure and revocation limits |
-| 4 | Input and downstream boundaries: scenarios G-H | Locate injection/SSRF/upload controls beyond the authentication layer |
-| 5 | Operations and resilience: scenarios I-K | Defend failover, outage, abuse and deployment choices without failing open |
-| 6 | Optional AI/messages extension: scenario L | Preserve the same identity/resource rules across non-HTTP entry points |
-
-Finish each pass with a short design explanation and one counterexample that your first design would not handle. Only then consult the Spring companion for the integration points relevant to that pass.
-
-### 9.3 Scenario A: choose browser session/BFF or direct API tokens
-
-**Concepts:** authentication ownership, credential placement, browser trust and horizontal scaling.
-
-**Attack/failure:** browser-accessible tokens are stolen, or pod B cannot restore the session established on A.
-
-**Trust boundary:** browser to backend; backend to identity provider/API; pod to session store.
-
-**Control:** choose a flow explicitly. A BFF retains OAuth tokens server-side and uses protected application sessions with CSRF defenses. A direct SPA uses supported code + PKCE and access tokens for the intended API. Use shared session storage when cross-pod restoration is required.
-
-**Trade-off:** BFF adds session/token-storage operations and does not eliminate XSS actions. Direct tokens simplify independent API authentication but add browser credential exposure/lifecycle concerns. Shared sessions scale; locally validated JWTs remove one lookup, not all shared state.
-
-**How to verify:** trace which credential crosses each hop; route successive requests and the login callback across pods; restart one pod; test logout and session-store failure. For direct tokens, verify missing/invalid tokens are rejected on every replica.
-
-**Design defense:** "Why not choose JWT solely because there are multiple pods?" Explain the actual state/availability requirement and browser-security choice.
-
-### 9.4 Scenario B: a correctly signed token belongs to another API
-
-**Concepts:** issuer/audience trust, token purpose, public keys, login correlation and delegation.
-
-**Attack/failure:** an API accepts an ID token, a wrong-audience access token or claims decoded without validation. A callback is unrelated to the browser's saved login attempt.
-
-**Trust boundary:** externally supplied credential to trusted application identity.
-
-**Control:** use a configured trust source, signature/algorithm and required claim checks, including intended audience and time. Validate OIDC login correlation with supported state/nonce/PKCE handling as applicable. Never choose trust from arbitrary token-supplied key URLs. Obtain appropriately delegated downstream tokens instead of forwarding any incoming token.
-
-**Trade-off:** discovery/key caches and rotation introduce dependencies; delegation adds provider integration and permission design. A signature is necessary evidence for a signed token, not sufficient authorization.
-
-**How to verify:** use isolated fixture keys and send valid, expired, wrong-issuer/audience, altered and wrong-purpose tokens. Test callback correlation mismatches and PKCE verifier rejection in a controlled provider setup. Separate mocked-policy tests from the real validation path.
-
-**Design defense:** explain why Pattern B can validate ID-token signatures locally just as Pattern C validates JWT access tokens, while their token purpose and browser credential differ.
-
-### 9.5 Scenario C: a permitted user reads another tenant's order
-
-**Concepts:** broken object/function-level authorization, role ownership, least privilege and trusted tenant identity.
-
-**Attack/failure:** a user changes an order ID, submits another tenant ID, or invokes an administrator-only operation despite holding a valid token.
-
-**Trust boundary:** authenticated caller to a specific action/resource; request input to authoritative entitlement data.
-
-**Control:** deny by default; check capability and current resource/tenant relationship at a service/query boundary every relevant entry point crosses. Resolve identities using the issuer/subject and account model. Choose application-managed, central or hybrid roles deliberately; a token claim needs interpretation, not blind acceptance.
-
-**Trade-off:** live entitlement checks improve freshness but add state/latency; cached claims need bounded staleness. Consistent 404/403 disclosure policy and administrative exceptions require explicit decisions. UUIDs reduce guessing, not authorization obligations.
-
-**How to verify:** build a caller/action/resource matrix including owner, same-tenant non-owner, other tenant, admin, suspended user and background worker. Test reads, writes, lists, exports and alternate entry points, not only one GET.
-
-**Design defense:** show why `orders.read`, an `ADMIN` claim or frontend-hidden buttons alone cannot enforce the full policy.
-
-### 9.6 Scenario D: a browser performs an unintended state change
-
-**Concepts:** CSRF, CORS, ambient credentials and safe HTTP methods.
-
-**Attack/failure:** a malicious site induces an authenticated browser to submit a state-changing request. Separately, a legitimate SPA cannot read a cross-origin response.
-
-**Trust boundary:** another origin to a browser-authenticated backend; JavaScript response access versus server-side action.
-
-**Control:** keep GET/read-only semantics; apply appropriate CSRF proof and cookie/origin protections for automatically attached credentials. Configure explicit CORS origins/methods/headers for legitimate cross-origin access. Reassess whenever an authentication-cookie fallback is introduced.
-
-**Trade-off:** SPA token delivery/renewal and cross-site deployments add complexity. SameSite behavior is useful defense in depth, not a universal substitute for CSRF analysis. An explicit bearer-only model changes CSRF assumptions but leaves token theft/XSS risks.
-
-**How to verify:** test unsafe cookie-authenticated requests with missing/incorrect/correct CSRF proof; test real browser preflight and simple-request behavior for allowed/disallowed origins. Postman alone cannot verify browser enforcement.
-
-**Design defense:** explain why CORS failure does not prove a state-changing request never executed, and why JWT format does not justify disabling CSRF.
-
-For diagrams, request examples and the SPA integration flow, see [the browser-security walkthrough](#10-browser-security-visualize-cors-csrf-and-xss).
-
-### 9.7 Scenario E: stored content executes in another user's browser
-
-**Concepts:** XSS, output context, safe rendering and credential exposure.
-
-**Attack/failure:** an order comment or rendered document introduces executable content into a trusted origin.
-
-**Trust boundary:** untrusted text/HTML to executable browser content.
-
-**Control:** context-appropriate output encoding, safe DOM APIs, maintained sanitization where rich HTML is genuinely needed, and a restrictive Content Security Policy as defense in depth. Protect authentication cookies and minimize accessible token exposure.
-
-**Trade-off:** rich content is harder to secure than plain text; CSP has integration costs and does not repair unsafe rendering. HttpOnly prevents direct cookie reads, not authenticated actions by malicious same-origin script.
-
-**How to verify:** in an isolated test page, use harmless rendering fixtures across text, attribute, link and permitted rich-content contexts; assert unsafe schemes/event handlers are removed or inert while legitimate formatting survives. Inspect CSP violations and authentication-cookie attributes.
-
-**Design defense:** distinguish preventing script execution from limiting damage after execution. Neither CORS nor JWT signatures solve XSS.
-
-For rendering examples and the connection between XSS, cookies and CSRF, see [the browser-security walkthrough](#10-browser-security-visualize-cors-csrf-and-xss).
-
-### 9.8 Scenario F: credentials are stolen or a user is disabled
-
-**Concepts:** password hashing, bearer possession, refresh lifecycle and revocation freshness.
-
-**Attack/failure:** a token leaks through logs, a session is copied, or an account is disabled while credentials remain valid.
-
-**Trust boundary:** credential storage/telemetry to anyone possessing the credential; central account change to cached application decisions.
-
-**Control:** TLS, secure storage, log redaction, least-privilege scope/audience, appropriate expiry and explicit session/refresh/access-token revocation policy. Use adaptive password hashing for password verifiers; use managed secret/workload identity facilities where appropriate. Require stronger/renewed authentication for sensitive actions as needed.
-
-**Trade-off:** short lifetimes increase renewal traffic; introspection or revocation checks add availability/latency dependencies. JWT local validation normally cannot promise immediate disablement. Refresh-token rotation/reuse handling depends on provider capabilities.
-
-**How to verify:** check logs/traces for test-secret redaction, copy a test credential and observe the documented post-logout/disablement window, and verify refresh-token rejection/reuse handling where supported. Never use live credentials in fixtures.
-
-**Design defense:** specify an acceptable freshness window rather than claiming "logout revokes everything" or "opaque means instant revocation."
-
-### 9.9 Scenario G: untrusted input changes a query or binds privileged fields
-
-**Concepts:** injection, allowlist validation, over-posting and business invariants.
-
-**Attack/failure:** concatenated query input changes query meaning, or a create-order payload supplies `ownerId`, price or approval status that the caller must not control.
-
-**Trust boundary:** request fields to query structure, persistence updates and privileged business decisions.
-
-**Control:** parameterized queries, allowlisted dynamic identifiers/sort fields, narrow request DTOs, explicit field mapping and server-derived privileged values. Enforce business rules and object/property permissions; authentication alone is irrelevant to query safety.
-
-**Trade-off:** explicit mapping takes work but exposes the writable contract. ORM/JPA helps bind values, not arbitrary concatenated query structure or authorization.
-
-**How to verify:** harmless boundary inputs remain literal data; unsupported sort fields and unauthorized properties cannot affect results/state. Test that permitted fields still work and validation failures cause no partial forbidden update.
-
-**Design defense:** explain why "we use JPA" and "the caller is authenticated" are insufficient answers.
-
-### 9.10 Scenario H: URL fetching or uploads cross a server boundary
-
-**Concepts:** SSRF, untrusted files, egress policy and resource limits.
-
-**Attack/failure:** a user-supplied document URL targets an internal service, or an upload is oversized, executable, misleadingly typed or unsafe to parse.
-
-**Trust boundary:** untrusted URL/file to server network access, storage and parser execution.
-
-**Control:** prefer fixed destination integrations; otherwise restrict schemes/destinations, handle DNS resolution and redirects safely, enforce network egress limits and avoid forwarding user credentials. For uploads, constrain size/type, validate actual content, use safe names and isolated non-executable storage, authorize retrieval and apply suitable scanning/parser isolation.
-
-**Trade-off:** flexible URL imports have a larger boundary than fixed connectors; scanning/processing adds latency and does not guarantee harmless content. Extension checks alone are insufficient.
-
-**How to verify:** use controlled local test destinations, never real metadata/internal targets. Exercise denied destinations/redirects and bounded downloads; test oversized/mismatched files and unauthorized retrieval without executing uploaded content.
-
-**Design defense:** show where application validation and network/storage controls reinforce each other rather than relying on one regex.
-
-### 9.11 Scenario I: identity infrastructure or shared state is unavailable
-
-**Concepts:** fail-closed behavior, key rotation, caches, sessions and resilience.
-
-**Attack/failure:** key refresh, introspection or shared-session retrieval fails during a rollout/outage.
-
-**Trust boundary:** dependency availability to the application's ability to establish trust.
-
-**Control:** bounded timeouts, appropriate caches/rotation overlap, secure shared-state access and explicit failure semantics. A still-valid JWT with a suitable cached trusted key can be validated locally; unknown keys may require retrieval. Reject when required trust cannot be established; do not extend expiry to mask an outage.
-
-**Trade-off:** stronger freshness needs can increase dependency coupling. Retries without limits amplify outages; stale identity/permission policy needs explicit bounds, not silent fallback.
-
-**How to verify:** interrupt test dependencies, rotate isolated keys, restart replicas and measure the actual behavior for cached-known-key, unknown-key, expired-token and missing-session cases. Verify recovery and alerts without logging credentials.
-
-**Design defense:** avoid both blanket claims that JWTs always survive an outage and that every JWT request requires the identity provider.
-
-### 9.12 Scenario J: authorized requests cause abuse or resource exhaustion
-
-**Concepts:** resource consumption, sensitive business flows, rate/concurrency limits and replay safety.
-
-**Attack/failure:** a valid user repeatedly invokes expensive exports, login/reset flows or order creation; retries duplicate a consequential action.
-
-**Trust boundary:** permission to invoke an operation to permission to consume unlimited resources or repeat its effect.
-
-**Control:** suitable per-caller/tenant and service-level quotas, bounded payloads/pagination/work, concurrency controls and abuse monitoring. Add business uniqueness/idempotency and reconciliation where repeated actions can cause harm.
-
-**Trade-off:** strict limits can block legitimate bursts or shared clients; distributed enforcement and idempotency records add state. An idempotency key is not authorization and does not prevent every form of abuse.
-
-**How to verify:** bounded load tests, concurrent duplicates and timeout/retry cases demonstrate the promised work/effect limits and recovery. Confirm ordinary users remain usable and denial responses do not leak account existence.
-
-**Design defense:** explain why authenticated traffic can still be abusive and why retries need business-level reasoning.
-
-### 9.13 Scenario K: configuration, dependencies or telemetry expose the service
-
-**Concepts:** secure defaults, software supply chain, error handling and auditability.
-
-**Attack/failure:** a public management endpoint, vulnerable renderer/dependency, secret-bearing trace or overly detailed error bypasses an otherwise sound login design.
-
-**Trust boundary:** deployment/tooling configuration and third-party code to the running application's exposed privileges/data.
-
-**Control:** deliberate endpoint inventory, minimal permissions, supported patched dependencies, reproducible/reviewed build inputs, protected secret provisioning, sanitized error contracts and security-event auditing. Review dependency advisories and deployment configuration, not just application annotations.
-
-**Trade-off:** useful diagnostics must not expose credentials or excessive personal data; audit retention/access and noisy alerts need policy. Scanning is evidence input, not proof of exploitability or safety.
-
-**How to verify:** inspect the deployed public surface and effective configuration; use synthetic redaction/error cases; verify build/dependency controls and alert delivery with safe test events. Check audit completeness for sensitive actions and appropriate access to the records.
-
-**Design defense:** distinguish a framework dependency being present from the actual control being configured and enforced.
-
-### 9.14 Scenario L: AI tools or persistent connections request extra authority
-
-**Concepts:** untrusted instructions/messages, per-operation authorization and long-lived identity.
-
-**Attack/failure:** a model requests another tenant's documents or a WebSocket client subscribes to an unauthorized order topic.
-
-**Trust boundary:** prompt/tool/message input to trusted caller identity and service/resource access.
-
-**Control:** derive identity outside untrusted arguments; constrain retrieval before returning data to the model; authorize tool actions and subscriptions using shared domain policy. Validate messages, restrict destinations and reconsider authorization freshness on long-lived connections; require explicit approval for consequential actions where appropriate.
-
-**Trade-off:** per-operation checks add cost but connection authentication or model instructions cannot grant blanket authority. Human approval complements, not replaces, access control.
-
-**How to verify:** run controlled cross-tenant tool/subscription attempts, forged identity arguments, revoked entitlements and reconnects. Confirm denied data never reaches the model/client and denied actions have no effect.
-
-**Design defense:** explain why MCP/WebSockets are integration/transport mechanisms, not replacements for authentication and authorization.
-
-### 9.15 Use OWASP as a coverage lens, not a memorized ranking
-
-Use the official [OWASP Top 10](https://owasp.org/www-project-top-ten/), [API Security Top 10](https://owasp.org/www-project-api-security/) and relevant [Cheat Sheets](https://cheatsheetseries.owasp.org/) when expanding each scenario. Record the edition used at that time; this plan intentionally avoids edition-dependent ranks/IDs and is not an exhaustive compliance checklist.
-
-| Topic family to revisit | Scenarios |
+| "Why not store everything in localStorage?" | Any successful same-origin script injection can read it; persistence extends exposure. Memory reduces persistence, not XSS access. A BFF changes token placement but adds session operations. |
+| "Does a BFF eliminate XSS and CSRF?" | No. HttpOnly prevents direct session-cookie reads, not malicious authenticated actions. Cookie-authenticated actions still need appropriate CSRF defenses. |
+| "Why code + PKCE? Can the SPA keep a client secret?" | Browser-delivered secrets are not confidential. PKCE binds code redemption to the initiating client's verifier; it does not protect a stolen access token or replace supported state/nonce checks. |
+| "Why does Postman work while our frontend fails?" | Investigate browser CORS/preflight and credential delivery. Do not loosen authentication to fix a response-access problem. |
+| "Can the API forward that token to another service?" | Only if the token is intended for that service and delegation is appropriate. Otherwise obtain a downstream token; a worker acting as itself uses client credentials/workload identity, not a user's login token. |
+
+**Check the design:** trace the credential on each hop, reject a mismatched login callback, and verify that unauthenticated API calls fail in both designs. Never log the credentials while tracing.
+
+### 9.2 The token is valid. Why a 403, or another customer's data?
+
+```mermaid
+flowchart TD
+    Request["Request with access token"] --> Token{"Trusted issuer, signature, audience and time?"}
+    Token -->|No| Unauthenticated["401: invalid credential"]
+    Token -->|Yes| Capability{"Required mapped permission?"}
+    Capability -->|No| Forbidden["403: insufficient permission"]
+    Capability -->|Yes| Resource{"Authorized tenant / ownership?"}
+    Resource -->|No| Deny["Deny: consistent 403 or concealment 404"]
+    Resource -->|Yes| Return["Return only permitted data"]
+    Capability -.->|If resource check omitted| Leak["Valid user reads another tenant's order"]
+```
+
+**Why it happens:** "valid token", "can read orders" and "can read this order" are three different decisions. A signature alone does not even establish that the token belongs to this API.
+
+**Normal solution:** validate the intended access token, map permissions explicitly, then enforce resource relationships at the shared service/query boundary. Derive tenant access from trusted membership, not a caller-supplied tenant ID.
+
+| Interviewer follow-up | Answer cue |
 | --- | --- |
-| Authentication, access control and API object/function/property permissions | A-C, F-G, L |
-| Browser/script injection and request forgery | D-E |
-| Injection and server-side request forgery | G-H |
-| Cryptographic/credential handling | B, F |
-| Resource consumption and sensitive-flow abuse | J |
-| Misconfiguration, dependency/supply-chain integrity, logging and exceptional failure paths | I-K |
+| "The JWT contains ADMIN. Why still 403?" | Check actual authority mapping (`ROLE_`/`SCOPE_` in Spring), required operation and resource policy. Also distinguish CSRF rejection from an authorization failure; 403 alone does not diagnose the cause. |
+| "Can't we use an ID token? It has the same signature." | It is login evidence for the OIDC client, not API access permission. Enforce token purpose and intended audience as well as issuer/signature/time. |
+| "Would UUIDs or hiding the button solve the data leak?" | Neither is authorization. Constrain resource lookup by the authorized relationship, including lists and exports. |
+| "Who owns roles: the provider or our application?" | Either, or a hybrid. Central claims supply coarse permissions; current application data often supplies ownership and tenant membership. Cached token claims have a staleness window. |
+| "What about admins, workers or AI tools?" | Give explicit scoped entitlements, audit exceptional cross-tenant access, and reuse the domain rule at every entry point. A tool argument or WebSocket subscription cannot grant itself identity or access. |
 
-When detail is needed, select concrete verification requirements from the [OWASP Application Security Verification Standard](https://owasp.org/www-project-application-security-verification-standard/) rather than treating a Top 10 category name as an implementation requirement.
+**Check the design:** test owner, other tenant and scoped admin against GET, update, list and export. Separately test altered, expired and wrong-audience tokens through real validation, not only mocked authentication.
 
-### 9.16 First worked explanation: cross-tenant order access
+### 9.3 I copied the token into Postman. What happens after logout?
 
-> **Attack/failure:** a valid user changes the order ID and receives another tenant's order.
->
-> **Trust boundary:** a caller-selected identifier is crossing into another tenant's data; token validity does not prove that relationship.
->
-> **Control:** resolve the caller and permitted tenant membership from trusted identity/entitlements, check the operation, then constrain the order query by the authorized relationship. Apply the same rule to exports and background/tool paths.
->
-> **Trade-off:** current membership checks improve revocation freshness but add dependency cost. If cached, specify the acceptable staleness. Choose a consistent not-found/forbidden disclosure policy.
->
-> **How to verify:** caller A can read its permitted order; the same caller cannot read tenant B's order via direct GET, list/export or a forged tenant parameter. Missing/invalid credentials fail independently. Changing membership produces the documented result within the chosen freshness window.
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Postman as Postman with copied test token
+    participant API
+    participant IdP as Identity provider
+    Browser->>API: Access token
+    API-->>Browser: Authorized response
+    Browser->>Browser: Logout clears local credentials
+    Postman->>API: Same still-valid bearer token
+    API-->>Postman: May still succeed without a revocation check
+    Note over Browser,IdP: Separate server-side step: revoke refresh credential if supported
+    Browser->>IdP: Attempt renewal with a retained test copy
+    IdP-->>Browser: Renewal denied if revocation was enforced
+```
 
-**Counter-question:** "What if an administrator needs cross-tenant access?" Model that as a deliberate, constrained and audited entitlement, not an unconditional bypass inferred from a label.
+**Why it happens:** a bearer token proves possession, not which client is presenting it. Clearing browser state or revoking a refresh token does not automatically invalidate an already issued access JWT.
 
-The Spring mapping comes last: a request/method capability check plus the authoritative service/query resource rule. An annotation alone does not establish tenant isolation.
+**Normal solution:** limit access-token lifetime, scope and audience; protect credentials from logs/XSS; define logout and account-disablement freshness separately. Immediate rejection needs enforced server-side state, introspection or another current-policy check, with an availability cost.
 
-## 10. Browser security: visualize CORS, CSRF and XSS
+| Interviewer follow-up | Answer cue |
+| --- | --- |
+| "Can we promise immediate disablement with local JWT checks?" | Not from signature/time alone. Add an enforced current-status/revocation check or document a bounded validity window. Short expiry reduces, not eliminates, the window. |
+| "Does an opaque token guarantee instant revocation?" | Only if the authority's status changes and the API's introspection/cache policy observes it soon enough. Format alone guarantees nothing. |
+| "Why not make access tokens last a few seconds?" | More renewal traffic, outage coupling and concurrency complexity. Choose lifetime from risk and usability, not an arbitrary minimum. |
+| "What does refresh-token rotation solve?" | It can detect reuse and contain renewal after theft, depending on provider policy. Concurrent tabs/retries need supported handling; it does not revoke all access tokens by itself. |
+| "Would CORS or PKCE stop my copied token?" | No. CORS is a browser rule; PKCE protects code redemption. DPoP/mTLS-bound tokens require the matching key as well, but add client/infrastructure complexity. |
 
-These are different boundaries, not three names for the same attack. Use the order portal as the running example:
+**Check the design:** use test credentials to measure access after logout/disablement and after expiry; test refresh rejection/reuse according to provider policy. Keep tokens out of screenshots, traces and fixtures.
+
+### 9.4 Login fails after a rollout. What if the identity provider is down?
+
+```mermaid
+flowchart TD
+    Cookie["Browser sends session cookie"] --> PodB["Pod B: login was on pod A"]
+    PodB --> Store{"Shared session and callback state available?"}
+    Store -->|Yes| Session["Restore session"]
+    Store -->|No| SessionFail["Do not invent an authenticated session"]
+    JWT["API receives JWT access token"] --> Key{"Suitable cached trusted key?"}
+    Key -->|Yes| Validate["Validate claims and authorize locally"]
+    Key -->|No| Fetch["Bounded trusted key retrieval"]
+    Fetch -->|Trusted key obtained| Validate
+    Fetch -->|Unavailable| Reject["Cannot establish trust: no access"]
+```
+
+**Why it happens:** in this session design, the cookie references server-side state rather than carrying it. JWT checks can be local, but new login, renewal, unknown signing keys and live entitlement checks may still depend on other services.
+
+**Normal solution:** share required session/login-correlation state across replicas; use supported key caching and rotation overlap, bounded timeouts and explicit unavailable-dependency errors. Do not skip checks or extend token expiry to keep traffic flowing.
+
+| Interviewer follow-up | Answer cue |
+| --- | --- |
+| "Would sticky sessions fix it?" | They can reduce cross-pod misses, but pod loss/rollouts still lose local state. Affinity is not durable session storage. |
+| "Why does the login callback fail before a session exists?" | The saved authorization request, state and PKCE verifier may also be local to the initiating pod. Share the required correlation state through the supported integration. |
+| "Does every JWT request call the identity provider?" | No, not with a suitable cached trusted key and local claim validation. Introspection and live permission checks are separate dependencies. |
+| "What happens during signing-key rotation?" | Retrieve from configured trusted JWKS, cache appropriately and support rotation overlap. Use `kid` to select within trusted keys, not arbitrary token-supplied URLs; rate-limit refresh attempts. |
+| "Should dependency failure become a 401 or a retry?" | Do not claim a good credential is invalid just because storage is unavailable. Use deliberate unavailable-service handling where appropriate, bounded retries and alerts; never grant access on failure. |
+
+**Check the design:** alternate replicas during login and normal use, restart a pod, then interrupt test session/key services. Distinguish cached-known-key, unknown-key, expired-token and unavailable-store behavior.
+
+### 9.5 The user is logged in. Can we trust their payload or URL?
+
+```mermaid
+flowchart TD
+    Input["Authenticated but untrusted input"] --> Fields["ownerId / price / approval status"]
+    Fields --> Mapping["Narrow DTO; explicit mapping; server derives protected values"]
+    Input --> Query["Search value / sort field"]
+    Query --> Binding["Bind values; allowlist query structure"]
+    Input --> URL["Document import URL"]
+    URL --> Network["Restrict destinations, redirects and egress; bound downloads"]
+```
+
+**Why it happens:** identity does not make input safe. Three separate failures are hidden here: writing protected fields (over-posting), changing query meaning (injection), and using the server to reach a forbidden destination (SSRF).
+
+**Normal solution:** enforce each boundary where input takes effect. Explicit contracts reduce flexibility, but are easier to defend than binding an entire entity or fetching any supplied URL.
+
+| Interviewer follow-up | Answer cue |
+| --- | --- |
+| "We use JPA. Can SQL injection still happen?" | Bound values stay data; concatenated JPQL/native SQL or unchecked dynamic identifiers can still change query structure. Sort fields need an allowlist, not value binding alone. |
+| "Why not bind JSON directly to the entity?" | It can expose writable owner, price or status fields. Use a narrow request DTO and explicit mapping; derive privileged values and enforce business rules server-side. |
+| "Our URL starts with HTTPS. Isn't that safe?" | HTTPS says nothing about destination trust. Restrict destinations, resolve/check addresses safely, revalidate redirects and enforce network egress policy; one string check misses DNS/redirect changes. |
+| "What if we accept a file instead of a URL?" | Bound size and actual type; use safe names, isolated non-executable storage, authorized retrieval and suitable scanning/parser isolation. A `.pdf` extension is not proof of safe content. |
+| "Can validation replace authorization or output escaping?" | No. Valid input can name someone else's object, and stored text can later reach an unsafe rendering context. Apply resource policy and section 10's rendering controls separately. |
+
+**Check the design:** protected fields cannot be changed, query fixtures stay literal, and unsupported sort fields fail clearly. Use controlled test destinations for blocked redirects/download limits; never probe real internal metadata services.
+
+### 9.6 The endpoint is authorized. Why overload or duplicate orders?
+
+```mermaid
+flowchart TD
+    Calls["Authenticated requests"] --> Budget{"Caller / tenant quota and work budget?"}
+    Budget -->|Exceeded| Limit["Reject or defer with explicit limits"]
+    Budget -->|Within budget| Type{"Which operation?"}
+    Type -->|Export| Export["Bound rows, concurrency and queued work"]
+    Type -->|Create order| Key{"Atomically claim caller-scoped idempotency key"}
+    Key -->|New| Commit["Commit effect and durable outcome"]
+    Key -->|Repeat| Repeat["Check payload match; return prior outcome or in-progress status"]
+```
+
+**Why it happens:** permission to call is not permission to consume unlimited resources. Separately, a timeout does not tell the caller whether an order was committed, so a retry can repeat the effect.
+
+**Normal solution:** bound request size, pagination, execution and concurrency; enforce caller/tenant quotas. For consequential writes, combine scoped idempotency records with business uniqueness and transactional/outbox design where needed. These controls add coordination/state, but solve different problems.
+
+| Interviewer follow-up | Answer cue |
+| --- | --- |
+| "Why not rate-limit by IP only?" | Shared networks can group legitimate users; distributed clients evade a single-IP limit. Combine suitable caller/tenant and service limits, and protect unauthenticated login/reset flows too. |
+| "We moved exports to a queue. Problem solved?" | An unbounded queue just moves the overload. Bound submissions, backlog, worker concurrency and per-job cost; authorize access to job status/results. |
+| "Two pods receive the same idempotency key together?" | Use a shared atomic claim/unique constraint scoped to caller and operation. An in-memory check-then-insert races. |
+| "Same key but a different payload?" | Compare a stored request fingerprint and reject conflicting reuse. Reauthorize callers and avoid returning another caller's result. |
+| "The payment succeeded, but storing the response failed?" | A local transaction cannot atomically commit an external payment. Use downstream idempotency, durable workflow/outbox state and reconciliation; do not promise exactly-once effects from a retry header. |
+
+**Check the design:** run bounded bursts, concurrent duplicates and commit/timeout/retry cases. Verify one intended business effect, recoverable outcomes, payload-conflict rejection and fair limits across tenants.
+
+### 9.7 Before calling the design secure
+
+| Practical closing question | Evidence to look for |
+| --- | --- |
+| "What did we actually expose?" | Deployed route/management-endpoint inventory, effective configuration and least-privilege service identities. |
+| "Can support diagnose failures without leaking secrets?" | Redacted errors/traces; audit actor, action, resource and outcome with protected access/retention. Never log bearer tokens. |
+| "Who maintains the security dependencies?" | Supported patched versions, advisory review and reviewed/reproducible build inputs; a scanner result is a lead, not proof of safety or exploitability. |
+
+Use [OWASP Top 10](https://owasp.org/www-project-top-ten/), [API Security Top 10](https://owasp.org/www-project-api-security/) and [Cheat Sheets](https://cheatsheetseries.owasp.org/) to find missed failure modes, not memorize rankings. Use [ASVS](https://owasp.org/www-project-application-security-verification-standard/) for concrete verification requirements, noting the edition when expanding a topic.
+
+## 10. Browser security: why CORS, CSRF and XSS happen
+
+Read this section as **cause → consequence → usual fix**, not as definitions. All three problems come from things the browser does *automatically* on the user's behalf:
+
+| Browser behaviour | Problem it creates | What we normally do | Short recall |
+| --- | --- | --- | --- |
+| Blocks scripts from reading responses from another origin (same-origin policy) | Our own frontend on another origin cannot read our API | **CORS**: the API allowlists the origins that may read it | "Who may *read* my responses?" |
+| Attaches cookies automatically to matching requests | Another site can make the user's browser *act* with their session | **CSRF defenses**: require proof the request came from our app | "Cookie proves *who*, not *intent*" |
+| Runs any script that ends up in the page as our origin | Untrusted content becomes code running *as our app* | **XSS defenses**: keep data as data when rendering | "Data must never become code" |
+
+**Ordering insight:** XSS defeats the other two. Injected script is already same-origin, so CORS does not apply to it and it can read CSRF tokens or browser-held bearer tokens. Prevent XSS first.
+
+**Outside the browser none of this applies.** Postman, curl and backend services do not enforce CORS and do not attach cookies automatically. That is why copying a bearer token into Postman works: it is token replay, and only authentication, authorization, token lifetime and audience limit it.
+
+Running example:
 
 ```text
 Browser frontend: https://app.example.com
@@ -482,35 +541,40 @@ Order API:        https://api.example.com
 Untrusted site:   https://untrusted.example.net
 ```
 
-An **origin** is scheme + host + port. The frontend and API above are cross-origin but ordinarily same-site because they share the scheme and registrable domain. SameSite cookie rules and CORS origin rules are therefore not interchangeable. Cookie attachment also depends on cookie attributes, request credentials mode and browser policy.
+An **origin** is scheme + host + port, so `app` and `api` above are different origins. They are still the same *site* (same registrable domain), which matters for SameSite cookies. CORS works on origins and SameSite works on sites; they are not interchangeable.
 
-| Mechanism | Main question | Not a substitute for |
-| --- | --- | --- |
-| CORS | May JavaScript at this origin read this cross-origin response? | Authentication, resource authorization or general CSRF protection |
-| CSRF defenses | Is this browser-credentialed state change accompanied by the expected request proof? | XSS prevention or resource authorization |
-| XSS defenses | Can untrusted content become executable code in our trusted origin? | Server-side authorization |
+### 10.1 CORS: why our own frontend cannot read our own API
 
-### 10.1 CORS: permission to read a cross-origin response
+**Recall:** the browser protects users by not letting one origin's script read another origin's data. CORS is the API *opting in* to let specific origins read it. It loosens a browser restriction; it does not protect the server.
 
-**Problem:** the legitimate frontend calls the API, but the browser refuses to expose the response to JavaScript. Postman succeeds because it does not enforce browser CORS.
+**Why the situation arises in real apps:**
+
+| Situation | Example |
+| --- | --- |
+| Frontend and API deployed separately | SPA on a CDN at `app.example.com`, API on AKS at `api.example.com` |
+| Local development | React on `localhost:3000`, Spring Boot on `localhost:8080` (different ports mean different origins) |
+| One API, many frontends | Customer app, admin portal and partner portal all call one API |
+| Browser calls third-party APIs | Maps, payments, search |
+
+**Why the browser blocks it by default:** without the same-origin policy, script on any site you visit could call your bank's API with your cookies and *read* the answer.
+
+**How it plays out:**
 
 ```mermaid
 sequenceDiagram
     participant JS as SPA at app.example.com
     participant Browser
     participant API as api.example.com
-    JS->>Browser: Fetch with Authorization header
-    Browser->>API: OPTIONS preflight with Origin and requested method/headers
+    JS->>Browser: fetch with Authorization header
+    Browser->>API: OPTIONS preflight (Origin, method, headers)
     API-->>Browser: Allow this origin, method and headers
     Browser->>API: Actual request with access token
-    API->>API: Validate credential and authorize resource
-    API-->>Browser: Response with appropriate CORS headers
-    Browser-->>JS: Expose response if CORS permits
+    API->>API: Authenticate and authorize as usual
+    API-->>Browser: Response with CORS headers
+    Browser-->>JS: Expose response only if CORS permits
 ```
 
-This depicts a preflighted request. An explicit `Authorization` header triggers preflight for a cross-origin fetch; some other requests do not need preflight.
-
-Illustrative preflight exchange:
+A JSON body, an `Authorization` header or methods like `PUT`/`DELETE` trigger the preflight. Simple requests skip it. In that case **the server may already have executed the request** before the browser blocks the response.
 
 ```http
 OPTIONS /orders/123 HTTP/1.1
@@ -525,9 +589,10 @@ Access-Control-Allow-Headers: Authorization
 Vary: Origin
 ```
 
-The actual response also needs the applicable CORS headers. Preflight approval does not authenticate the subsequent request. If preflight fails, the browser does not send that actual request; for a request that does **not** require preflight, the server may already have processed it before the browser blocks response access.
+**What we normally do:**
 
-**Spring integration fragment** (Boot 3.5 / Security 6.5 Servlet):
+1. **Avoid the need:** serve the SPA and API from one origin through a gateway/ingress (`/` → SPA, `/api` → backend), or use a dev-server proxy locally. No CORS is needed. This is common with the BFF approach (Pattern B).
+2. **Otherwise allowlist explicitly:** exact origins, required methods and headers only.
 
 ```java
 @Bean
@@ -543,13 +608,23 @@ CorsConfigurationSource corsConfigurationSource() {
 }
 ```
 
-Activate with `http.cors(Customizer.withDefaults())` in the relevant security chain. The example's route prefix is `/api/**`; match it to the real routes. It is bearer-oriented and does not enable cookie credentials. For credentialed cross-origin sessions, deliberately configure credentials on both client and server, explicit origins rather than `*`, the CSRF header and browser-compatible cookie policy.
+Activate with `http.cors(Customizer.withDefaults())` (Boot 3.5 / Security 6.5 Servlet). This bearer-oriented example does not enable cookie credentials.
 
-**Trade-off/defense:** allow only required origins/methods/headers, but do not mistake that list for a firewall. Non-browser callers remain free to send requests and must face authentication/authorization.
+**What you see at work:** a browser console error saying "blocked by CORS policy" while the same call works in Postman. The fix belongs on the server's allowlist, not in disabling security.
 
-### 10.2 CSRF: the browser has credentials, but who intended the action?
+**Common mistakes:**
 
-**Problem:** a user is logged in. An untrusted page causes their browser to send an unwanted state-changing request. The attacker need not read the response.
+- Treating CORS as access control. Any non-browser client ignores it.
+- Using `*`, or reflecting any `Origin` back, together with credentials (cookies). This lets any site read the user's data.
+- Forgetting the CORS headers on the actual response, or authentication rejecting the `OPTIONS` preflight.
+
+**Verify:** an allowed origin gets headers on both the preflight and the actual response, and still needs valid credentials. A disallowed origin's preflighted request is never sent.
+
+### 10.2 CSRF: why a logged-in user's browser can be used against them
+
+**Recall:** the browser attaches cookies automatically, so a cookie proves *who* the user is, not that *our app* sent the request. CSRF defenses add proof of intent that another site cannot obtain.
+
+**Why it happens:** the user is logged in to the order app (session cookie). They open an untrusted page, which submits a form, loads an image URL or sends a link to the order app. The browser attaches the session cookie. The attacker never sees the response and does not need to: the side effect is the attack.
 
 ```mermaid
 sequenceDiagram
@@ -558,28 +633,35 @@ sequenceDiagram
     participant Site as Untrusted page
     participant API as Order application
     User->>Browser: Log in to order application
-    API-->>Browser: Application session cookie
-    User->>Site: Visit untrusted page
-    Site->>Browser: Induce state-changing request
-    Browser->>API: Request plus cookie if browser policy permits
-    API->>API: Session proves identity, not user intent
-    API-->>Browser: Reject without valid CSRF proof
+    API-->>Browser: Session cookie
+    User->>Site: Visit page or click malicious link
+    Site->>Browser: Trigger state-changing request
+    Browser->>API: Request plus cookie (if cookie policy allows)
+    API->>API: Session proves identity, not intent
+    API-->>Browser: Reject without valid CSRF token
 ```
 
-The cookie step is conditional: SameSite and other browser rules can block it in some situations. Do not rely on every deployment being protected by that condition, especially with same-site sibling origins or deliberately cross-site cookies.
+**The malicious-link variant:** if a `GET` changes state (for example, `/orders/123/cancel`), clicking a link is enough. `SameSite=Lax` still sends cookies on top-level `GET` navigation, so safe methods must never change state.
 
-For a session-based SPA, the legitimate flow is:
+**Who is exposed depends on the credential model:**
+
+| Credential model | CSRF risk | Usual approach |
+| --- | --- | --- |
+| Session cookie (Patterns A and B) | Yes, because the browser sends the cookie automatically | Keep CSRF protection on and send the token from the frontend |
+| Bearer token added by JavaScript (Pattern C) | Low, because another site cannot make the browser add our header | CSRF protection is commonly disabled for that API, as a reasoned decision |
+| JWT stored in a cookie | Yes again, because it is a cookie | Treat it as a cookie-based session |
+
+The token format is irrelevant. What matters is whether the browser supplies the credential **automatically**.
+
+**What we normally do (session-based SPA):**
 
 ```text
-1. Browser establishes application session.
-2. Frontend obtains the CSRF token through the supported integration.
-3. Frontend explicitly submits the token in the configured header/form field.
-4. Browser attaches the session cookie according to its rules.
-5. Backend validates session + CSRF proof, then capability + resource policy.
-6. After login/logout, frontend obtains renewed proof as the integration requires.
+1. Browser establishes the session.
+2. Frontend obtains the CSRF token from the backend's supported mechanism.
+3. Frontend sends it in a header (for example X-CSRF-TOKEN or X-XSRF-TOKEN).
+4. Backend checks session + CSRF token, then authorization.
+5. After login/logout, the frontend fetches the renewed token.
 ```
-
-Illustrative request shape, not a complete token-delivery implementation:
 
 ```javascript
 async function createOrder(order, csrfToken) {
@@ -599,89 +681,98 @@ async function createOrder(order, csrfToken) {
 }
 ```
 
-Here `csrfToken` must come from the backend's supported CSRF integration; the expected header may instead be `X-XSRF-TOKEN`. Do not invent a constant or assume any cookie value can simply be echoed: repository, request-handler and version-specific masking/renewal behavior must agree. Keep the authentication cookie HttpOnly; a separate readable CSRF cookie can be appropriate.
+`csrfToken` must come from the backend's CSRF integration; header name and masking behaviour are framework/version specific. Another origin cannot read this token because of the same-origin policy, unless XSS or an unsafe CORS rule leaks it. Layer `SameSite` cookies and origin checks on top.
 
-This same-origin fragment needs no CORS. A separate frontend origin requires a deliberate credentialed-CORS and cookie configuration; `credentials: "include"` alone cannot override cookie policy or authorize an origin.
+**What you see at work:** a security scan reports "CSRF protection disabled". Usually someone hit a `403` on `POST` from the frontend and turned CSRF off instead of sending the token. Ask: *what property of this credential model makes CSRF unnecessary?* If the answer is "nothing, we use cookies", the finding is real.
 
-**Why the attacker cannot ordinarily supply the proof:** another origin cannot simply read the application's CSRF token under the browser's same-origin policy, provided the application has not exposed it through unsafe CORS, XSS or another leak. Replaying only the automatically attached authentication cookie is not enough.
+**Common mistakes:**
 
-**Bearer contrast:** a client that explicitly attaches an access token, with no automatically supplied authentication fallback, has different CSRF assumptions. Putting that same JWT into an authentication cookie changes the analysis. JWT format is not the defense.
+- Disabling CSRF globally to fix a frontend `403`.
+- Allowing state changes on `GET`.
+- Assuming `SameSite` alone is enough. Sibling subdomains are same-site, and older or misconfigured cookies may lack it.
 
-**Trade-off/defense:** preserve anti-CSRF checks for the chosen credential model, keep safe methods free of intended state changes and use appropriate cookie/origin protections as additional layers. Do not disable CSRF merely because a legitimate SPA has not yet wired token submission.
+**Verify:** a cookie-authenticated `POST` without a valid token is rejected with no side effect. A valid token on an unauthorized resource is still rejected, because CSRF proof is not permission.
 
-### 10.3 XSS: untrusted content becomes trusted-origin code
+### 10.3 XSS: why untrusted content can run as our app
 
-**Problem:** the application displays an order comment or rendered document as executable content rather than data. The browser now sees code running under the application's origin, not under the attacker's separate origin.
+**Recall:** XSS happens when untrusted data reaches a place where the browser interprets it as code. That code runs with our origin's full privileges. The fix is to keep data as data at every rendering point.
+
+**Why it is so damaging:** the browser cannot tell our script from injected script on our page. The injected code can read the page, read any token JavaScript can access, read CSRF tokens and call our API as the user. CORS and CSRF defenses do not stop it, because it is same-origin.
 
 ```mermaid
 flowchart LR
-    Input["Untrusted comment, URL or document"] --> Render{"Rendering boundary"}
-    Render -->|Unsafe HTML insertion| Code["Code executes in trusted origin"]
-    Code --> Read["May read accessible tokens/data"]
-    Code --> Act["May send authenticated actions"]
-    Render -->|Safe text or maintained HTML sanitization| Data["Display as data or permitted markup"]
+    Input["Untrusted comment, URL or document"] --> Render{"Rendering point"}
+    Render -->|innerHTML, unsafe template, eval| Code["Runs as our origin"]
+    Code --> Read["Reads tokens and page data"]
+    Code --> Act["Calls the API as the user"]
+    Render -->|textContent or sanitizer| Data["Shown as text or allowed markup"]
 ```
 
-Three common routes into the same boundary:
+**How it gets in:**
 
-| Route | Example |
+| Route | How it plays out |
 | --- | --- |
-| Stored XSS | A persisted comment is rendered unsafely for another user |
-| Reflected XSS | Request input is echoed into an unsafe response context |
-| DOM-based XSS | Frontend code moves URL/input data into an unsafe DOM sink |
+| Stored | Attacker saves a comment containing script; every user who views it runs it |
+| Reflected | A crafted link puts input into the server's response unsafely; the victim clicks it |
+| DOM-based | Frontend JavaScript moves URL or input data into an unsafe DOM sink, without the server being involved |
 
-Prefer text insertion when rich HTML is unnecessary:
+DOM manipulation is the most common delivery route, but the underlying problem is **data crossing into code**, which can also happen in server templates, attributes, URLs (`javascript:`) and inline scripts.
+
+**What we normally do:**
+
+1. Insert text as text. Frameworks such as React and Angular escape by default; the danger is the escape hatches (`innerHTML`, `dangerouslySetInnerHTML`, `bypassSecurityTrust...`).
 
 ```javascript
-// commentElement is an existing DOM element; commentText is untrusted text.
 commentElement.textContent = commentText;
 ```
 
-For an actual rich-content requirement, use a maintained sanitizer and a deliberately restricted policy:
+2. If rich content is a real requirement, use a maintained sanitizer with a narrow allowlist. Markdown conversion alone is not sanitization; this reader PWA uses marked + DOMPurify for that reason.
 
 ```javascript
-// DOMPurify must be loaded from a maintained, trusted dependency.
 commentElement.innerHTML = DOMPurify.sanitize(commentHtml, {
     ALLOWED_TAGS: ["p", "strong", "em", "ul", "ol", "li", "br"],
     ALLOWED_ATTR: []
 });
 ```
 
-These are alternatives, not an instruction to treat every comment as HTML. The narrow sanitizer example intentionally excludes links, images and attributes. If those become requirements, design their URL/context policies explicitly. Do not concatenate unsanitized fragments after sanitization. Markdown conversion alone is not sanitization.
+3. Encode for the right context (HTML, attribute, URL, JavaScript), which templating engines do when used normally.
+4. Add a **Content-Security-Policy** as a second line of defense, limiting script sources and blocking inline script.
+5. Reduce what a successful XSS can steal: `HttpOnly` session cookies, and a BFF instead of tokens held in the browser.
 
-**Context matters:** HTML text encoding is not automatically suitable inside JavaScript, CSS, URLs or arbitrary attributes. Prefer APIs/templates that keep data separate from executable structure; avoid embedding untrusted strings in code.
+**What you see at work:** scanners flag `innerHTML` use, missing CSP headers or reflected parameters. Review where untrusted data meets a rendering sink.
 
-**Defense in depth:** use a suitable Content Security Policy, maintained dependencies, secure cookies and minimized browser token exposure. CSP is not a replacement for safe rendering.
+**Common mistakes:**
 
-**Why HttpOnly is not complete XSS protection:** it prevents direct JavaScript reads of the authentication cookie. Malicious same-origin script may still send requests with that cookie and read accessible page data or CSRF proof. A BFF reduces direct OAuth-token exposure but does not make XSS harmless.
+- Thinking `HttpOnly` prevents XSS. It only stops cookie theft; injected script can still send requests with the cookie.
+- Thinking a BFF makes XSS harmless. It removes token theft, not actions taken as the user.
+- Sanitizing once and then concatenating more untrusted strings.
 
-### 10.4 Put the three controls together
+**Verify:** harmless test payloads in comments, URLs and documents render as text or allowed markup, with no event handlers or `javascript:` links surviving.
+
+### 10.4 Cookie attributes: which problem each one addresses
+
+| Attribute | What it does | Helps with | Does not stop |
+| --- | --- | --- | --- |
+| `HttpOnly` | JavaScript cannot read the cookie | Cookie theft through XSS | XSS sending requests as the user |
+| `Secure` | Sent only over HTTPS | Network interception | XSS, CSRF |
+| `SameSite=Lax` | Not sent on cross-site subrequests; sent on top-level `GET` navigation | Most cross-site CSRF | State-changing `GET`, same-site sibling subdomains |
+| `SameSite=Strict` | Not sent on any cross-site request | CSRF, more strongly | Usability, because links from other sites arrive logged out |
+| `__Host-` prefix | Requires `Secure`, `Path=/` and no `Domain` | Cookie injection from subdomains | XSS on the same host |
+
+### 10.5 Put it together
 
 ```text
-Legitimate SPA from a different origin
-    -> CORS permits intended response access
-    -> authentication establishes identity
-    -> CSRF proof required if the credential model needs it
-    -> capability + resource authorization permits the action
-    -> safe rendering keeps returned untrusted content from becoming code
+Legitimate SPA on another origin
+    -> CORS lets it read the intended responses
+    -> authentication establishes who the user is
+    -> CSRF proof is required if the credential arrives automatically (cookie)
+    -> authorization decides whether this user may act on this resource
+    -> safe rendering keeps returned content from becoming code
 ```
 
-None of these steps grants blanket trust to another. CORS cannot authorize order ownership; CSRF proof cannot authorize an administrator action; a valid JWT cannot make unsafe HTML safe.
+No step replaces another. CORS cannot authorize order ownership, a CSRF token is not a permission, and a valid JWT does not make unsafe HTML safe.
 
-| Verification case | Expected evidence |
-| --- | --- |
-| Allowed-origin preflight and actual request | Correct CORS headers on both; actual request still requires credentials/permissions |
-| Disallowed-origin preflight | Browser does not send the preflighted actual request |
-| Request not requiring preflight | Response blocking is distinguished from whether the backend executed an action |
-| Cookie-authenticated unsafe request without valid CSRF proof | Rejected with no business side effect, even for an authenticated user |
-| Valid CSRF proof but unauthorized resource | Resource policy still rejects; CSRF does not grant entitlement |
-| Login/logout token lifecycle | Required CSRF renewal works; stale proof follows the configured rejection policy |
-| Untrusted rendering fixtures | Displayed as text or restricted markup; no executable handlers/schemes; legitimate formatting preserved |
-| HttpOnly cookie inspection | Script cannot read the cookie; tests do not infer that same-origin malicious actions are impossible |
-
-Use an isolated test application and harmless fixtures. Test browser behavior in a real browser; use backend tests separately for authorization and CSRF rejection. These are proposed checks, not claims that a deployed application has passed them.
-
-**Interview recall:** CORS is about cross-origin browser reading; CSRF is about unwanted actions using automatically supplied credentials; XSS is about untrusted content executing as your origin. Explain the boundary first, then the framework setting.
+**One-minute interview answer:** "CORS, CSRF and XSS all come from automatic browser behaviour. Same-origin policy blocks cross-origin reads, so we use CORS to allowlist our own frontends; it is not access control. Browsers attach cookies automatically, so cookie-based apps need CSRF tokens; bearer tokens sent by JavaScript in a header avoid that. XSS means untrusted data runs as our origin, which defeats both, so we render safely, sanitize rich content, add CSP and keep tokens out of JavaScript's reach."
 
 ## References
 
