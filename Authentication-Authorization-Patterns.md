@@ -58,10 +58,10 @@ With multiple pods, choose shared session storage or a deliberate routing/sessio
 
 | Interviewer follow-up | Practical answer cue |
 | --- | --- |
-| "Does the browser keep sending the password?" | No; it sends the session cookie. Store an adaptive password hash, not recoverable plaintext. |
-| "Why change the session ID at login?" | Prevent an attacker-chosen pre-login ID from becoming the authenticated session: session fixation protection. |
-| "Why does login work but POST fail?" | Check CSRF delivery and authorization separately. A valid session bypasses neither; do not disable protection merely to clear a 403. |
-| "How does logout or account disablement take effect?" | Invalidate relevant server sessions and enforce current account policy. Clearing one cookie does not invalidate a copied session; distinguish idle and absolute lifetime. |
+| "After password login, what does the browser send when it loads an order?" | It sends the session cookie, not the password again. The backend uses the cookie's session ID to retrieve the authenticated user; the password database holds an adaptive hash used only for credential verification. |
+| "A session exists before login. Why give it a different ID afterward?" | Otherwise an attacker who knows or arranged that pre-login ID might reuse it after the victim authenticates. Rotate the ID at authentication while preserving only appropriate state; this is session fixation protection. |
+| "The session cookie works for GET, but creating an order returns 403. What do you inspect?" | Check whether the POST supplied the expected CSRF proof, then whether the user has create permission. A valid session proves identity, not request intent or permission; fix the missing integration instead of disabling the checks. |
+| "An administrator disables a user with three active sessions. Is clearing one browser cookie enough?" | No; the other sessions still exist. Invalidate relevant server sessions or enforce current account status on use. Also define idle timeout (time without activity) and absolute lifetime (maximum age even with activity). |
 
 [Spring implementation: section 8.2](Spring-Security-Interview-Notes.md#82-pattern-a-application-owned-login-and-server-session).
 
@@ -130,10 +130,10 @@ The portal may still need current domain data: "can read orders" does not mean "
 
 | Interviewer follow-up | Practical answer cue |
 | --- | --- |
-| "Does Google decide which orders I can access?" | It establishes identity; application membership/ownership still decides access. Provider roles contribute only if deliberately mapped. |
-| "Can we link an existing account just by matching email?" | Do not blindly merge identities. Use trusted issuer/subject identity and a deliberate verified account-linking flow; email can change or carry different assurance. |
-| "What must survive a pod switch during login?" | Saved correlation/verifier, then session and server-held authorized-client tokens. The callback can fail before normal API use begins. |
-| "Why am I signed in again after logout?" | The app session ended but the provider session may remain. Decide which login and credential layers to end. |
+| "Google login succeeded. Does that give the user access to every order in our app?" | No; Google establishes identity, while our app checks membership and order ownership. Trusted provider roles can contribute to permission checks, but cannot infer our resource relationships. |
+| "Google returns the same email as an existing local account. Should we merge them automatically?" | Not merely because the strings match. Identify the external account using the trusted issuer and subject, and require a deliberate account-linking process with appropriate proof of control; email may change or have different assurance across providers. |
+| "Login starts on pod A, but the callback reaches B. Why does it fail before the user has an app session?" | B may lack the saved authorization request and verifier that prove this callback belongs to the login A started. Make that correlation state accessible across pods; after login, the application session and server-held API credentials also need the appropriate shared storage. |
+| "We cleared the app session, but clicking Sign in immediately logs the user in again. Is logout broken?" | Not necessarily: the provider's separate login session may still be active. Decide whether logout means leaving only this app or also requesting provider logout and credential revocation; clearing one session does not end every layer. |
 
 [Spring implementation: section 8.3](Spring-Security-Interview-Notes.md#83-pattern-b-enterprise-oidc-login-with-a-backend-session).
 
@@ -148,7 +148,7 @@ SPA -> identity provider: authorization code + PKCE
 
 **Example:** a browser order dashboard calls an independently exposed order API. The SPA is a public OAuth client and cannot keep a client secret. The API is a resource server, not necessarily a login application.
 
-**Connection to your extracted flow:** the external-login path has this shape: the browser's authentication library obtains an API access token; the backend validates it directly, without issuing a replacement JWT or establishing a browser login session. This is a generalized recall example, not a reproduction of internal configuration or a live verification of that application.
+**Concrete example:** a browser dashboard uses an authentication library to obtain an access token for its order API. The API validates that token directly, without issuing a replacement JWT or establishing a browser login session. This is the generalized shape of the extracted application flow, not a claim that its deployment has been verified.
 
 ```mermaid
 sequenceDiagram
@@ -198,6 +198,8 @@ The issuer keeps its private signing key; APIs receive public verification keys,
 
 Libraries normally cache keys and refresh as needed, including for rotation. This is not normally a network validation request for every JWT. Do not fetch arbitrary key URLs or accept arbitrary issuers supplied by an untrusted token.
 
+**Key-cache policy** means how long a cached public-key set is eligible for reuse, when an unknown `kid` triggers refresh, how refresh is bounded, and what happens if retrieval fails. It is not a user-session or token-revocation cache. Continue only with a key eligible under the configured policy; otherwise deny access rather than skip verification.
+
 After signature verification, validate expected issuer, intended API audience, timestamps and applicable token/algorithm policy. A valid token with `orders.read` still needs the application's ownership/tenant checks.
 
 **Important connection:** Pattern B commonly also uses published public keys to validate its ID token locally. B versus C is primarily about client placement, token purpose and the browser-to-backend credential, not "remote validation versus local validation."
@@ -206,11 +208,11 @@ After signature verification, validate expected issuer, intended API audience, t
 
 | Interviewer follow-up | Practical answer cue |
 | --- | --- |
-| "Where does the user's password go?" | To the provider in external login, not the protected API. Local password-token login is a separate issuer/trust design. |
-| "Do we need the private key or a client secret?" | APIs use public verification keys, never the issuer's private signing key. Browser clients cannot keep a confidential secret. |
-| "How do we recover an expired browser token?" | Let the library attempt supported silent acquisition; redirect when interaction is required. Surface other failures rather than creating redirect loops or retrying every 403 as login. |
-| "Why successful login followed by 401 or 403?" | Wrong audience/issuer or expiry can cause 401; a trusted identity without mapped permission can cause 403. Diagnose the actual failing stage; key retrieval errors can also be surfaced as authentication errors in some implementations. |
-| "Does a five-minute key cache mean a five-minute token?" | No. Key-cache policy and token expiry are independent; each request still needs validation. Local signature checks do not ask the provider about logout on every call. |
+| "Microsoft sign-in succeeds. Did our protected API receive the user's Microsoft password?" | No; the provider handled the password and other login factors. Our API receives an access token and validates it. A separate local password-login mode would make our application responsible for credential verification and token issuance. |
+| "The token is signed by the provider. Do all API pods need its private key or our SPA's secret?" | No; the API verifies with the provider's published public keys. The provider alone holds the private signing key, and a browser-delivered SPA cannot keep a client secret confidential. A backend OAuth client may have client credentials for a different purpose. |
+| "An API token expires while the dashboard is open. Should every failure redirect to login?" | No; first let the library obtain another usable token through its supported silent flow. Redirect when user interaction is required; surface network/configuration errors and permission denials separately, otherwise the app can loop through login without fixing the cause. |
+| "The login screen says success, but GET /orders returns 401; an admin action returns 403. How do you distinguish them?" | For 401, inspect token acceptance: intended API audience, issuer, signature, time and key availability. For 403, inspect mapped permissions and resource rules. A key-fetch outage can appear as 401 in some implementations, so server diagnostics must distinguish unavailable verification from bad credentials without exposing tokens. |
+| "Suppose the API caches JWKS for five minutes, while a token expires in one hour. Which lifetime applies?" | Both, to different things. The key-cache policy controls reuse and refresh of public verification keys; the token's expiry controls credential validity. Every request still checks its token, and refreshing keys does not check whether the user logged out. |
 
 [Spring implementation: section 8.4](Spring-Security-Interview-Notes.md#84-pattern-c-spa-obtains-a-token-and-calls-the-resource-server).
 
@@ -239,11 +241,11 @@ Provision least-privilege application permissions. Use supported workload/federa
 
 | Interviewer follow-up | Practical answer cue |
 | --- | --- |
-| "Which user's permissions does the worker have?" | None inherently: it represents an application. Grant explicit application permissions and resource limits; do not invent a human user. |
-| "What if it must act on behalf of a user?" | Use supported delegation/token exchange for the downstream audience. Client credentials changes identity and is not an equivalent shortcut. |
-| "Must we keep a client secret?" | Prefer supported workload/federated identity or certificates where suitable. Otherwise provision and rotate secrets securely, outside frontend code and the repository. |
-| "Should every job obtain a new token?" | Reuse a protected token within validity; coordinate renewal and bound retries. Normally reacquire rather than use user-style refresh tokens. |
-| "Is an internal network enough to trust callers?" | No. Validate service identity/audience and enforce least privilege. Network controls complement authentication and authorization. |
+| "A scheduled reconciliation job runs with no user logged in. Whose permissions does it use?" | The calling application's permissions, not a fictional human user's. Give that identity only the operations and tenant/resource access the job needs; successful application authentication is not universal administrator access. |
+| "A user asks service A to perform an action in service B. Can A use its broad application token instead?" | That may discard the user's restrictions and create excessive authority. Use supported user delegation/token exchange when the action is on the user's behalf, with a token intended for B; use application authority only when that is the explicit business policy. |
+| "Where should the worker keep the credential it uses to obtain tokens?" | Prefer a supported platform/workload identity so no manually managed secret is required. If a secret or certificate is necessary, provision it securely and rotate it; do not commit it or deliver it to browser code. |
+| "A worker processes a thousand jobs. Should it request a token for each job?" | Usually no; reuse a protected cached token until renewal is needed. Coordinate renewal to avoid a request burst, and bound retries during provider outages. Client-credentials flows normally obtain a new token by authenticating again, not through a user refresh token. |
+| "Both services run in the same private cluster. Can B skip token validation?" | No; network location does not establish the calling application or its rights. Validate identity and audience and enforce least privilege; private routing is an additional barrier, not a replacement. |
 
 [Spring implementation: section 8.5](Spring-Security-Interview-Notes.md#85-pattern-d-service-to-service-client-credentials).
 
@@ -270,11 +272,11 @@ This is the same **application acting as itself** model as Pattern D, not a clai
 
 | Interviewer follow-up | Practical answer cue |
 | --- | --- |
-| "Does enabling managed identity grant access?" | No. Assign least-privilege target permissions, such as an appropriate Key Vault RBAC role. Authentication and authorization remain separate. |
-| "Can we reuse that token for Storage or our API?" | Request a token for the intended resource. A Key Vault token is not valid API access evidence for a different audience. |
-| "Can our custom API accept this identity?" | Configure trusted Entra token validation and explicitly authorize the application identity through suitable app roles or a deliberate access policy. |
-| "How does this relate to AKS Workload Identity?" | A Kubernetes service-account token is exchanged through a configured federation with an Entra application or user-assigned managed identity. Unlike a VM's managed-identity endpoint, the trust rests on the federated issuer, subject and audience configuration. |
-| "Which identity is used on my laptop?" | A credential chain may select a developer login rather than the deployed managed identity. Check the selected principal and its permissions; local success does not prove production access is configured. |
+| "Managed identity is enabled on our app, but Key Vault still denies secret access. What is missing?" | Enabling identity lets the app prove who it is; it does not grant secret access. Assign the appropriate least-privilege Key Vault role and check that it applies to the actual selected identity and resource scope. |
+| "The app has a Key Vault token. Can it send that token to Storage or our order API?" | No; tokens are intended for a particular resource. Ask for the target service's token and configure its permissions separately; sharing the issuer does not make audiences interchangeable. |
+| "Our own API is not an Azure resource like Key Vault. Can it authorize a managed identity?" | Yes, if configured to accept the intended Entra access token. Validate the token, identify the calling application and enforce an explicit application-role/access policy; merely enabling Entra login for human users is not enough. |
+| "An AKS pod has no client secret. How does it prove its identity to Entra?" | It presents a Kubernetes service-account token under a configured federation: Entra trusts tokens from a specified issuer for a specified service account and intended audience. Entra then issues the resource access token. This differs from using a VM's platform managed-identity endpoint. |
+| "Key Vault works on my laptop but fails after deployment. Doesn't the SDK use the same identity?" | Not necessarily. A credential chain can use your developer login locally and the workload identity in production. Inspect the selected principal and target permissions in each environment; your personal access does not prove the app has access. |
 
 **Recall:** managed identity removes the manually managed credential, not the access token or the need for permissions.
 
@@ -342,6 +344,8 @@ Use these six conversations to recall **what goes wrong, why, where we fix it an
 
 ### 9.1 How would you secure a frontend calling our APIs?
 
+**Interview setup:** we are building a browser order portal with enterprise login and a separately deployed API. Should the browser call the API with tokens, or should a backend handle that for it? Explain the credential flow before choosing the framework.
+
 ```mermaid
 flowchart TD
     Browser["Browser"] --> Choice{"Where should OAuth tokens live?"}
@@ -357,17 +361,26 @@ flowchart TD
 
 **Normal solution:** use a BFF when keeping OAuth tokens out of browser JavaScript is the priority; use direct SPA tokens when browser-to-API access is a deliberate requirement. Both need server-side authorization. Browser-specific failures and fixes belong in [section 10](#10-browser-security-why-cors-csrf-and-xss-happen), not a duplicate checklist here.
 
+The BFF redeems the login code, stores OAuth tokens server-side and gives the browser a protected session cookie. It returns application data rather than tokens. This reduces token theft through JavaScript, at the cost of a backend hop, session storage and cookie/CSRF integration.
+
 | Interviewer follow-up | Answer cue |
 | --- | --- |
-| "Why not store everything in localStorage?" | Any successful same-origin script injection can read it; persistence extends exposure. Memory reduces persistence, not XSS access. A BFF changes token placement but adds session operations. |
-| "Does a BFF eliminate XSS and CSRF?" | No. HttpOnly prevents direct session-cookie reads, not malicious authenticated actions. Cookie-authenticated actions still need appropriate CSRF defenses. |
-| "Why code + PKCE? Can the SPA keep a client secret?" | Browser-delivered secrets are not confidential. PKCE binds code redemption to the initiating client's verifier; it does not protect a stolen access token or replace supported state/nonce checks. |
-| "Why does Postman work while our frontend fails?" | Investigate browser CORS/preflight and credential delivery. Do not loosen authentication to fix a response-access problem. |
-| "Can the API forward that token to another service?" | Only if the token is intended for that service and delegation is appropriate. Otherwise obtain a downstream token; a worker acting as itself uses client credentials/workload identity, not a user's login token. |
+| "The SPA needs to stay logged in after reload. Why not keep access and refresh tokens in localStorage?" | It is convenient, but injected same-origin JavaScript can copy those tokens, and persistence leaves them available longer. Memory reduces persistence, not XSS exposure; a BFF moves tokens out of JavaScript but requires a protected server session. |
+| "If the BFF keeps tokens on the server, can injected JavaScript still place an order?" | Yes; it can call the BFF from the victim's page and the browser attaches the session cookie. HttpOnly blocks direct cookie reads, not these actions. Safe rendering and appropriate CSRF defenses remain necessary; the BFF principally reduces credential exfiltration. |
+| "Why use PKCE instead of putting a client secret in the SPA?" | Anything shipped to the browser can be inspected. PKCE uses a fresh verifier and its challenge so an intercepted authorization code cannot be redeemed without that verifier. It does not protect an already stolen access token or replace login-correlation checks. |
+| "Our browser call fails, but the same token works in Postman. Should we relax API authentication?" | No; compare actual credential delivery and inspect CORS/preflight errors. Postman does not enforce browser response-access rules. Fix the allowed-origin/header configuration or frontend request, while keeping API authentication intact. |
+| "Our order API also calls a billing API. Can it simply pass through the incoming access token?" | Only if billing is an intended audience and the delegation policy permits that use. Otherwise acquire a suitable downstream token. A service acting as itself uses application authority, which is different from carrying the user's restricted authority. |
 
 **Check the design:** trace the credential on each hop, reject a mismatched login callback, and verify that unauthenticated API calls fail in both designs. Never log the credentials while tracing.
 
 ### 9.2 The token is valid. Why a 403, or another customer's data?
+
+Treat these as **two interview cases**, not one diagnosis:
+
+| Setup and symptom | Why it happens and normal fix |
+| --- | --- |
+| **Case A: legitimate admin denied.** Login works, but an admin-only request returns 403 despite a role claim. | The token may be accepted while its claim is not mapped to the permission the endpoint checks. Inspect validated claims, authority conversion and the actual denial stage; correct mapping rather than bypassing the endpoint policy. |
+| **Case B: another tenant's order exposed.** A permitted user changes `/orders/123` to another tenant's order ID and receives it. | The API checks permission to read orders but fetches by ID alone. Constrain the query by the caller's trusted tenant/ownership relationship; apply the same rule to lists and exports. |
 
 ```mermaid
 flowchart TD
@@ -376,7 +389,7 @@ flowchart TD
     Token -->|Yes| Capability{"Required mapped permission?"}
     Capability -->|No| Forbidden["403: insufficient permission"]
     Capability -->|Yes| Resource{"Authorized tenant / ownership?"}
-    Resource -->|No| Deny["Deny: consistent 403 or concealment 404"]
+    Resource -->|No| Deny["403, or 404 to avoid revealing object existence"]
     Resource -->|Yes| Return["Return only permitted data"]
     Capability -.->|If resource check omitted| Leak["Valid user reads another tenant's order"]
 ```
@@ -387,47 +400,53 @@ flowchart TD
 
 | Interviewer follow-up | Answer cue |
 | --- | --- |
-| "The JWT contains ADMIN. Why still 403?" | Check actual authority mapping (`ROLE_`/`SCOPE_` in Spring), required operation and resource policy. Also distinguish CSRF rejection from an authorization failure; 403 alone does not diagnose the cause. |
-| "Can't we use an ID token? It has the same signature." | It is login evidence for the OIDC client, not API access permission. Enforce token purpose and intended audience as well as issuer/signature/time. |
-| "Would UUIDs or hiding the button solve the data leak?" | Neither is authorization. Constrain resource lookup by the authorized relationship, including lists and exports. |
-| "Who owns roles: the provider or our application?" | Either, or a hybrid. Central claims supply coarse permissions; current application data often supplies ownership and tenant membership. Cached token claims have a staleness window. |
-| "What about admins, workers or AI tools?" | Give explicit scoped entitlements, audit exceptional cross-tenant access, and reuse the domain rule at every entry point. A tool argument or WebSocket subscription cannot grant itself identity or access. |
+| "The token says ADMIN, but the endpoint still denies it. Does that mean the token is invalid?" | Not necessarily; the API may accept identity but expect a different permission representation. For example, Spring's role check conventionally expects `ROLE_ADMIN`, while default scope conversion produces `SCOPE_...`. Inspect the mapping and denial reason; CSRF can also produce 403. |
+| "An ID token is signed by the same provider. Why not accept it as API access?" | The signature proves who signed it, not its intended use. An ID token is login evidence for the OIDC client; the API needs its intended access token and must validate purpose, audience, issuer and time. |
+| "Could we fix Case B by using UUIDs or hiding the order link?" | No; a discovered ID or direct request still works without a resource check. Use the authorized relationship in the lookup and all alternate paths. Choose a consistent 403/404 policy if object existence itself is sensitive. |
+| "Roles come from the provider, but tenant membership changes in our database. Which source should win?" | Define ownership of each decision: provider claims may grant broad capabilities, while current application data restricts tenant/resource access. Token claims remain stale until replaced unless another check observes changes; choose an acceptable freshness window. |
+| "Support admins need cross-tenant access. Should ADMIN bypass every ownership check?" | No; model the exception as explicit, scoped and audited authority. Workers, tool actions and subscriptions must cross the same policy boundary; do not trust a supplied tenant/user argument to grant that exception. |
 
 **Check the design:** test owner, other tenant and scoped admin against GET, update, list and export. Separately test altered, expired and wrong-audience tokens through real validation, not only mocked authentication.
 
 ### 9.3 I copied the token into Postman. What happens after logout?
+
+**Interview setup:** a developer copies their own test access token into Postman. Calls succeed before and after logging out of the browser. Is logout broken, and what should the API promise?
 
 ```mermaid
 sequenceDiagram
     participant Browser
     participant Postman as Postman with copied test token
     participant API
-    participant IdP as Identity provider
     Browser->>API: Access token
     API-->>Browser: Authorized response
     Browser->>Browser: Logout clears local credentials
     Postman->>API: Same still-valid bearer token
     API-->>Postman: May still succeed without a revocation check
-    Note over Browser,IdP: Separate server-side step: revoke refresh credential if supported
-    Browser->>IdP: Attempt renewal with a retained test copy
-    IdP-->>Browser: Renewal denied if revocation was enforced
+    Note over Browser,API: Local logout does not automatically revoke issued access tokens
 ```
 
 **Why it happens:** a bearer token proves possession, not which client is presenting it. Clearing browser state or revoking a refresh token does not automatically invalidate an already issued access JWT.
 
 **Normal solution:** limit access-token lifetime, scope and audience; protect credentials from logs/XSS; define logout and account-disablement freshness separately. Immediate rejection needs enforced server-side state, introspection or another current-policy check, with an availability cost.
 
+Postman success is **not necessarily a bug**: it may match a documented expiry-based policy. It is a bug if the system promises immediate logout/disablement but does not enforce it. Revoke supported refresh credentials to stop renewal; that is separate from rejecting access tokens already issued or ending the provider session.
+
 | Interviewer follow-up | Answer cue |
 | --- | --- |
-| "Can we promise immediate disablement with local JWT checks?" | Not from signature/time alone. Add an enforced current-status/revocation check or document a bounded validity window. Short expiry reduces, not eliminates, the window. |
-| "Does an opaque token guarantee instant revocation?" | Only if the authority's status changes and the API's introspection/cache policy observes it soon enough. Format alone guarantees nothing. |
-| "Why not make access tokens last a few seconds?" | More renewal traffic, outage coupling and concurrency complexity. Choose lifetime from risk and usability, not an arbitrary minimum. |
-| "What does refresh-token rotation solve?" | It can detect reuse and contain renewal after theft, depending on provider policy. Concurrent tabs/retries need supported handling; it does not revoke all access tokens by itself. |
-| "Would CORS or PKCE stop my copied token?" | No. CORS is a browser rule; PKCE protects code redemption. DPoP/mTLS-bound tokens require the matching key as well, but add client/infrastructure complexity. |
+| "A disabled user still has a JWT valid for an hour. How would we cut off access now?" | Local signature/expiry checks cannot observe the account change. Add an enforced account-status or revocation check with a bounded cache window; otherwise state the expiry-based window honestly. That check adds shared state and outage/latency considerations. |
+| "Would switching to opaque tokens make logout immediate?" | It can make current status available through introspection, but only if revocation is recorded and the API observes it promptly. An active-result cache delays rejection; define cache lifetime and failure behavior rather than relying on token format. |
+| "Why not solve theft with ten-second access tokens?" | Very short lifetimes reduce exposure but increase renewal load and sensitivity to provider outages. Choose a risk-appropriate lifetime and protect renewal credentials; short expiry alone does not eliminate replay. |
+| "A stolen refresh token is used after the legitimate client has renewed. What can rotation do?" | Rotation replaces the renewal credential, allowing the provider to detect reuse of an old one and take its configured containment action. Concurrent tabs and retries need supported handling. Already issued access tokens still follow their separate validity/revocation policy. |
+| "How could the API reject a copied token even before expiry?" | Sender-constrained tokens can require proof of the matching key: DPoP uses a signed request proof, while mTLS binding uses the client certificate. Copying the token alone is then insufficient. This adds key management and integration complexity; CORS and PKCE do not provide this protection. |
 
 **Check the design:** use test credentials to measure access after logout/disablement and after expiry; test refresh rejection/reuse according to provider policy. Keep tokens out of screenshots, traces and fixtures.
 
 ### 9.4 Login fails after a rollout. What if the identity provider is down?
+
+| Separate interview case | Diagnosis and normal fix |
+| --- | --- |
+| **Case A: intermittent logout.** A session-based portal adds a second pod; requests alternate between logged-in and anonymous. | The receiving pod lacks the session state held by the original pod. Share session state, and share required login-callback state too; sticky routing does not survive pod loss. |
+| **Case B: JWT API during a provider outage.** Some existing tokens work, but tokens with a new key ID fail. | Existing requests may use eligible cached keys; a new key requires successful trusted retrieval. Configure rotation overlap, bounded refresh and explicit failure handling; do not skip verification. |
 
 ```mermaid
 flowchart TD
@@ -448,15 +467,21 @@ flowchart TD
 
 | Interviewer follow-up | Answer cue |
 | --- | --- |
-| "Would sticky sessions fix it?" | They can reduce cross-pod misses, but pod loss/rollouts still lose local state. Affinity is not durable session storage. |
-| "Why does the login callback fail before a session exists?" | The saved authorization request, state and PKCE verifier may also be local to the initiating pod. Share the required correlation state through the supported integration. |
-| "Does every JWT request call the identity provider?" | No, not with a suitable cached trusted key and local claim validation. Introspection and live permission checks are separate dependencies. |
-| "What happens during signing-key rotation?" | Retrieve from configured trusted JWKS, cache appropriately and support rotation overlap. Use `kid` to select within trusted keys, not arbitrary token-supplied URLs; rate-limit refresh attempts. |
-| "Should dependency failure become a 401 or a retry?" | Do not claim a good credential is invalid just because storage is unavailable. Use deliberate unavailable-service handling where appropriate, bounded retries and alerts; never grant access on failure. |
+| "We enabled sticky routing and intermittent logout stopped. Are we done?" | Not if sessions exist only in pod memory: a rollout or crash still destroys them. Affinity chooses a destination, not durable storage. Use a shared repository for required continuity and test pod replacement, not only steady-state routing. |
+| "The callback arrives on another pod before login has completed. What state could it be missing?" | The saved login request, state value and PKCE verifier connect the callback to the initiating browser. Without them B cannot safely accept it. Store that correlation through the supported cross-pod integration rather than ignoring the mismatch. |
+| "The provider is down. Must every existing JWT request fail?" | No; eligible cached trusted keys can support local signature/claim validation. New login, renewal, unknown-key retrieval and live permissions may still fail. Identify which dependency the request actually needs. |
+| "An attacker sends many random key IDs. Will each one download JWKS?" | It should not cause unbounded refresh. A key ID (`kid`) only selects among keys from the configured trusted key set (JWKS); bound refresh frequency and retries. Rotation still needs a supported refresh path and key overlap. |
+| "The session store times out. Should we retry forever, return 401, or let the user through?" | Never let the user through without required trust. Bound retries and surface an unavailable-service response where the integration permits, with useful internal diagnostics. Some stacks map key-fetch failures to authentication errors; distinguish outage from invalid credentials operationally. |
 
 **Check the design:** alternate replicas during login and normal use, restart a pod, then interrupt test session/key services. Distinguish cached-known-key, unknown-key, expired-token and unavailable-store behavior.
 
 ### 9.5 The user is logged in. Can we trust their payload or URL?
+
+| Concrete interview case | Why it works and where to fix it |
+| --- | --- |
+| **Over-posting:** the form sends item/quantity, but a caller adds `price: 0` and `status: APPROVED`; both are saved. | Binding the whole request onto a persistence entity makes protected fields writable. Accept a narrow request DTO (a class defining allowed input fields), map explicitly and derive price/status/owner on the server. |
+| **Injection:** a search or sort parameter is concatenated into query text. | Data can become query instructions. Bind search values as parameters and map sort choices to an allowlist of known fields; binding values does not protect dynamic query structure. |
+| **SSRF:** an import endpoint fetches any submitted document URL, including a forbidden internal destination. | Server-side request forgery uses the server's network access, not the user's browser. Prefer fixed integrations; otherwise restrict destinations/redirects and outbound network access (egress), with bounded downloads. |
 
 ```mermaid
 flowchart TD
@@ -474,15 +499,20 @@ flowchart TD
 
 | Interviewer follow-up | Answer cue |
 | --- | --- |
-| "We use JPA. Can SQL injection still happen?" | Bound values stay data; concatenated JPQL/native SQL or unchecked dynamic identifiers can still change query structure. Sort fields need an allowlist, not value binding alone. |
-| "Why not bind JSON directly to the entity?" | It can expose writable owner, price or status fields. Use a narrow request DTO and explicit mapping; derive privileged values and enforce business rules server-side. |
-| "Our URL starts with HTTPS. Isn't that safe?" | HTTPS says nothing about destination trust. Restrict destinations, resolve/check addresses safely, revalidate redirects and enforce network egress policy; one string check misses DNS/redirect changes. |
-| "What if we accept a file instead of a URL?" | Bound size and actual type; use safe names, isolated non-executable storage, authorized retrieval and suitable scanning/parser isolation. A `.pdf` extension is not proof of safe content. |
-| "Can validation replace authorization or output escaping?" | No. Valid input can name someone else's object, and stored text can later reach an unsafe rendering context. Apply resource policy and section 10's rendering controls separately. |
+| "Our ORM binds ordinary search values. Is arbitrary user-controlled sorting safe too?" | No; values and query structure are different. JPA's query language (JPQL) or native SQL can still be unsafe when constructed by concatenation. Map public sort choices to approved fields instead of accepting arbitrary query fragments. |
+| "Would rejecting unknown JSON properties prevent the price/status example?" | It helps only if the input contract excludes those properties. A DTO that includes every entity field still exposes them. Define writable fields explicitly, derive protected values server-side and enforce business transitions. |
+| "The import URL uses HTTPS and an approved hostname. What if it redirects?" | HTTPS protects transport, not destination policy. Recheck redirects and the actual resolved destination, and enforce outbound network restrictions so DNS changes or redirects cannot escape the approved boundary. Bound response size and time too. |
+| "We accept only PDFs. What if the scanner is unavailable or the file expands during processing?" | A name/type claim does not make content safe. Keep pending files private if required checks cannot finish; bound parsing, extraction and worker resources. Use generated storage IDs and isolated processing, and authorize every download/preview. |
+| "All fields pass validation. Why still check ownership and output rendering?" | A valid order ID can belong to another tenant, and valid free text can be rendered unsafely later. Validation checks the input contract; authorization checks rights, and safe rendering keeps data from becoming browser code. |
 
 **Check the design:** protected fields cannot be changed, query fixtures stay literal, and unsupported sort fields fail clearly. Use controlled test destinations for blocked redirects/download limits; never probe real internal metadata services.
 
 ### 9.6 The endpoint is authorized. Why overload or duplicate orders?
+
+| Separate interview case | Why it happens and normal fix |
+| --- | --- |
+| **Expensive export:** a valid user repeatedly starts full-history exports, exhausting workers. | Permission does not bound consumption. Limit caller/tenant submissions, rows, runtime, queued work and concurrent execution. |
+| **Retried creation:** an order commits, the response times out, and retry creates another order. | The caller cannot infer commit status from a timeout. Use a caller/operation-scoped idempotency key: a retry identifier stored durably so repeats recover the same outcome instead of repeating the effect. |
 
 ```mermaid
 flowchart TD
@@ -501,11 +531,11 @@ flowchart TD
 
 | Interviewer follow-up | Answer cue |
 | --- | --- |
-| "Why not rate-limit by IP only?" | Shared networks can group legitimate users; distributed clients evade a single-IP limit. Combine suitable caller/tenant and service limits, and protect unauthenticated login/reset flows too. |
-| "We moved exports to a queue. Problem solved?" | An unbounded queue just moves the overload. Bound submissions, backlog, worker concurrency and per-job cost; authorize access to job status/results. |
-| "Two pods receive the same idempotency key together?" | Use a shared atomic claim/unique constraint scoped to caller and operation. An in-memory check-then-insert races. |
-| "Same key but a different payload?" | Compare a stored request fingerprint and reject conflicting reuse. Reauthorize callers and avoid returning another caller's result. |
-| "The payment succeeded, but storing the response failed?" | A local transaction cannot atomically commit an external payment. Use downstream idempotency, durable workflow/outbox state and reconciliation; do not promise exactly-once effects from a retry header. |
+| "A whole customer office shares one IP address. Would an IP limit fairly control exports?" | Not by itself; it may block unrelated legitimate users, while distributed clients evade it. Combine caller/tenant quotas with service-wide limits, retaining appropriate IP/network controls for unauthenticated abuse. |
+| "Exports run asynchronously now. Can we accept unlimited jobs?" | No; the backlog can still exhaust storage or delay every tenant. Bound submissions, queue size, job cost and worker concurrency; check permissions again for result access and define how overload is reported. |
+| "Two API pods receive the same create-order retry key simultaneously. How do we avoid two orders?" | Claim the key atomically in shared storage, scoped to caller/operation; an in-memory check races. Coordinate the business write and durable outcome so a crash does not leave a completed effect looking new, and define recovery for an in-progress claim. |
+| "A client reuses the same key with a different quantity. Should we return the old result?" | Reject conflicting reuse after comparing a stored request fingerprint (a canonical representation or hash of the relevant payload). Reauthorize the caller and scope records so another user cannot retrieve the outcome. Define record retention and late-retry behavior too. |
+| "A payment provider charged successfully, but our worker crashed before recording success. What does a retry do?" | Use the provider's idempotency support and a durable workflow that can reconcile uncertain outcomes. An outbox stores work to send alongside the local transaction, but does not make an external charge atomic with our database. Do not promise exactly-once external effects from a header alone. |
 
 **Check the design:** run bounded bursts, concurrent duplicates and commit/timeout/retry cases. Verify one intended business effect, recoverable outcomes, payload-conflict rejection and fair limits across tenants.
 
@@ -513,9 +543,9 @@ flowchart TD
 
 | Practical closing question | Evidence to look for |
 | --- | --- |
-| "What did we actually expose?" | Deployed route/management-endpoint inventory, effective configuration and least-privilege service identities. |
-| "Can support diagnose failures without leaking secrets?" | Redacted errors/traces; audit actor, action, resource and outcome with protected access/retention. Never log bearer tokens. |
-| "Who maintains the security dependencies?" | Supported patched versions, advisory review and reviewed/reproducible build inputs; a scanner result is a lead, not proof of safety or exploitability. |
+| "Authentication tests pass. What would you inspect before exposing the deployment publicly?" | Check the deployed routes, management endpoints and effective configuration, not just source defaults. Confirm service identities have only required privileges and protected endpoints cannot be reached through an overlooked route. |
+| "Support wants the full Authorization header to diagnose failures. What would you record instead?" | Record safe correlation IDs and validation/denial categories, not bearer credentials. Sensitive actions need an audit of actor, action, resource and outcome with controlled access/retention; user-facing errors should not expose internal details. |
+| "A scanner reports a vulnerable library. Is that enough to accept or dismiss the finding?" | No; check the actual version, use and exposure, then remediate or document a reasoned assessment. Keep supported patched dependencies and reviewed build inputs; neither a clean scan nor a library's mere presence proves deployed safety. |
 
 Use [OWASP Top 10](https://owasp.org/www-project-top-ten/), [API Security Top 10](https://owasp.org/www-project-api-security/) and [Cheat Sheets](https://cheatsheetseries.owasp.org/) to find missed failure modes, not memorize rankings. Use [ASVS](https://owasp.org/www-project-application-security-verification-standard/) for concrete verification requirements, noting the edition when expanding a topic.
 
@@ -574,7 +604,7 @@ sequenceDiagram
     Browser-->>JS: Expose response only if CORS permits
 ```
 
-A JSON body, an `Authorization` header or methods like `PUT`/`DELETE` trigger the preflight. Simple requests skip it. In that case **the server may already have executed the request** before the browser blocks the response.
+A request with JSON content type, an `Authorization` header or a method such as `PUT`/`DELETE` requires preflight. A request meeting the browser's CORS-safelisted conditions needs no preflight: **it can reach the server and execute before the browser blocks JavaScript from reading the response**.
 
 ```http
 OPTIONS /orders/123 HTTP/1.1
@@ -615,7 +645,7 @@ Activate with `http.cors(Customizer.withDefaults())` (Boot 3.5 / Security 6.5 Se
 **Common mistakes:**
 
 - Treating CORS as access control. Any non-browser client ignores it.
-- Using `*`, or reflecting any `Origin` back, together with credentials (cookies). This lets any site read the user's data.
+- Combining `Access-Control-Allow-Origin: *` with credentialed requests: browsers reject that combination. "Fixing" it by reflecting arbitrary origins while allowing credentials is dangerous because it permits untrusted sites to read credentialed responses. Use an explicit trusted-origin allowlist.
 - Forgetting the CORS headers on the actual response, or authentication rejecting the `OPTIONS` preflight.
 
 **Verify:** an allowed origin gets headers on both the preflight and the actual response, and still needs valid credentials. A disallowed origin's preflighted request is never sent.
@@ -624,7 +654,7 @@ Activate with `http.cors(Customizer.withDefaults())` (Boot 3.5 / Security 6.5 Se
 
 **Recall:** the browser attaches cookies automatically, so a cookie proves *who* the user is, not that *our app* sent the request. CSRF defenses add proof of intent that another site cannot obtain.
 
-**Why it happens:** the user is logged in to the order app (session cookie). They open an untrusted page, which submits a form, loads an image URL or sends a link to the order app. The browser attaches the session cookie. The attacker never sees the response and does not need to: the side effect is the attack.
+**Why it happens:** the user is logged in to the order app. An untrusted page induces a request through a form or link; the browser attaches the session cookie **only if its cookie and request policies permit it**. An image URL can trigger a GET too, but cross-site image requests do not carry SameSite=Lax cookies. The attacker need not see the response: an unintended business side effect is enough.
 
 ```mermaid
 sequenceDiagram
@@ -716,7 +746,7 @@ flowchart LR
 | Reflected | A crafted link puts input into the server's response unsafely; the victim clicks it |
 | DOM-based | Frontend JavaScript moves URL or input data into an unsafe DOM sink, without the server being involved |
 
-DOM manipulation is the most common delivery route, but the underlying problem is **data crossing into code**, which can also happen in server templates, attributes, URLs (`javascript:`) and inline scripts.
+Unsafe DOM manipulation is one route, but the underlying problem is **data crossing into code**. Server templates, attributes, URLs (`javascript:`) and inline scripts can cross that boundary too; XSS is not defined by which layer performed the rendering.
 
 **What we normally do:**
 
@@ -726,7 +756,7 @@ DOM manipulation is the most common delivery route, but the underlying problem i
 commentElement.textContent = commentText;
 ```
 
-2. If rich content is a real requirement, use a maintained sanitizer with a narrow allowlist. Markdown conversion alone is not sanitization; this reader PWA uses marked + DOMPurify for that reason.
+2. If rich content is a real requirement, use a maintained sanitizer with a narrow allowlist. A Markdown-to-HTML converter creates markup; a sanitizer such as DOMPurify separately restricts unsafe content before insertion.
 
 ```javascript
 commentElement.innerHTML = DOMPurify.sanitize(commentHtml, {

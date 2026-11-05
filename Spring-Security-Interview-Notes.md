@@ -138,9 +138,9 @@ These are the questions to rehearse for Spring. Broader architecture questions a
 
 ### 10.1 Two security chains match. Do both run?
 
-**Answer:** only the first matching chain runs. Give specific API chains higher precedence and provide a deliberate catch-all policy.
+**Interview setup:** the API chain matches `/api/**`; a second chain matches every route. An API request matches both. Does it need to pass both chains, and what protects an unexpected route?
 
-**Scenario:** `/api/**` needs bearer authentication, while unrecognized routes must not accidentally become public. Test matching and non-matching routes; checking annotations alone is insufficient.
+**Answer:** only the first matching chain runs; the fallback is not an extra authorization pass. Give the specific API chain higher precedence and make the catch-all policy deliberate. Test both API and unmatched routes so a chain gap does not expose endpoints.
 
 ```java
 @Bean
@@ -169,19 +169,21 @@ This assumes a configured JWT decoder with trusted issuer, audience and key/algo
 
 ### 10.2 A user was loaded. Why is authentication not complete?
 
-**Answer:** `UserDetailsService` performs lookup; a password provider verifies the presented password with `PasswordEncoder` and checks account status.
+**Interview setup:** a custom login looks up the username successfully and returns success even when the supplied password is wrong. What is missing?
+
+**Answer:** finding the account is not credential verification. `UserDetailsService` supplies the stored user/password-hash information; the password authentication provider uses `PasswordEncoder` to check the presented password and account status. Prefer the supported provider rather than treating a successful database lookup as login.
 
 ```java
 boolean matches = encoder.matches(presentedPassword, storedEncodedPassword);
 ```
 
-**Scenario:** a custom provider returns a two-argument username/password token without validation. That is not successful authentication. Prefer the supported provider; never log passwords or compare newly salted hash strings.
+The two-argument `UsernamePasswordAuthenticationToken` represents an unauthenticated request, not proof that the password passed. Compare using `matches`, not by encoding the supplied password again and comparing salted strings. A provider that does not handle the token type can defer; it must not grant access on failed verification.
 
 ### 10.3 When roles are supplied in a JWT, why might the API return 403?
 
-**Answer:** role assignment, token validation and Spring authority conversion are distinct. Roles may instead be application-managed or hybrid; a JWT need not contain them.
+**Interview setup:** the API accepts the token's signature and claims. It contains `roles: ["ADMIN"]`, yet an endpoint using `hasRole("ADMIN")` denies access. Why?
 
-**Scenario:** the issuer supplies `roles: ["ADMIN"]`, but the application checks `hasRole("ADMIN")`, which conventionally requires `ROLE_ADMIN`. Default scope mapping commonly produces `SCOPE_...`, not that role.
+**Answer:** Spring checks granted authorities, not every raw claim automatically. `hasRole("ADMIN")` conventionally checks for `ROLE_ADMIN`; default JWT conversion commonly maps scopes to `SCOPE_...` instead. Configure the trusted role claim's conversion deliberately. Role assignment may also be application-managed rather than token-based.
 
 ```java
 JwtGrantedAuthoritiesConverter roles = new JwtGrantedAuthoritiesConverter();
@@ -197,7 +199,9 @@ This replaces default scope conversion; combine explicitly if both are required.
 
 ### 10.4 Does `@PreAuthorize` replace resource authorization?
 
-**Answer:** no. Enable method security explicitly. Proxy-based checks require a call through the proxy; self-invocation bypasses that interception.
+**Interview setup:** every caller with `orders.read` can invoke `read(id)`. A user changes the ID and retrieves another tenant's order. Doesn't the annotation protect the method?
+
+**Answer:** the annotation shown checks the capability to read orders, not ownership of the selected order. Enforce that relationship in the query/service rule or an explicit resource-aware permission expression. Enable method security, and ensure calls cross the proxy that applies its checks.
 
 ```java
 @PreAuthorize("hasAuthority('SCOPE_orders.read')")
@@ -206,29 +210,43 @@ public OrderView read(Long id) {
 }
 ```
 
-**Scenario:** `orders.read` permits a capability, but `loadAuthorizedOrder` must still enforce ownership/tenant policy using trusted identity. A call to `this.read(id)` does not gain proxy interception.
+Here `loadAuthorizedOrder` must use trusted caller identity and membership, not a tenant value from the request. A call to `this.read(id)` bypasses proxy interception; test alternate entry points as well as the controller path.
 
 ### 10.5 Why does a custom login work only for the current request?
 
-**Answer:** setting `SecurityContextHolder` establishes current-thread identity, not necessarily persisted session authentication. Use the configured session-authentication and context-save flow.
+**Interview setup:** a custom controller verifies credentials and sets `SecurityContextHolder`. The login response succeeds, but the next request with the browser's cookie is anonymous. Why?
 
-**Scenario:** the next request is anonymous because the context was never saved. Prefer standard login handling. Conversely, bearer Resource Server authentication normally validates each request without persisting an HTTP authentication session.
+```text
+Current request: set authenticated context → handler sees user
+Next request: restore from context repository → nothing saved → anonymous
+```
+
+**Answer:** the holder supplies identity for the current execution; it does not automatically guarantee session persistence. Follow the configured session-authentication strategy and save the context through the configured repository, preferably using standard login handling. Also check that the browser sends the expected cookie and replicas can access the session. A stateless bearer API deliberately authenticates each request instead of saving login state.
 
 ### 10.6 How should Spring handle CORS and CSRF for an SPA?
 
+**Interview setup:** a React frontend on a different origin cannot read API responses. After enabling CORS, cookie-authenticated POSTs still return 403. Are these the same failure?
+
 The full explanation now lives in [Browser security: why CORS, CSRF and XSS happen](Authentication-Authorization-Patterns.md#10-browser-security-why-cors-csrf-and-xss-happen), including diagrams, request flows, defensive snippets and verification cases.
 
-**Spring recall:** integrate CORS for trusted origins; preserve appropriate CSRF protection for automatically attached credentials. Use the version-specific SPA token lifecycle recipe. Do not solve browser failures with `permitAll` or unexplained `csrf.disable()`.
+**Answer:** no. CORS controls cross-origin browser response access; CSRF checks protect state changes using automatically attached credentials. Configure trusted origins and preflight handling, then wire the session-based SPA's CSRF token delivery/submission/renewal using the supported Spring version recipe. A bearer-only API has different CSRF assumptions. `permitAll` does not fix either integration, and unexplained `csrf.disable()` can remove required protection.
 
 ### 10.7 Why does REST advice not format authentication failures?
 
-**Answer:** security can reject before MVC. Use `AuthenticationEntryPoint` and `AccessDeniedHandler` for the relevant security mechanism.
+**Interview setup:** controller exceptions use the application's JSON error contract, but missing-token responses do not pass through `@RestControllerAdvice`. Where should that formatting be configured?
 
-**Scenario:** missing/invalid bearer credentials normally yield 401; insufficient authority normally yields 403. Preserve applicable `WWW-Authenticate` semantics when customizing responses, avoid sensitive diagnostics and distinguish CSRF failures from permission failures.
+```text
+Request → security filters → rejection handlers
+                     → if accepted: MVC controller → REST advice on MVC errors
+```
+
+**Answer:** authentication may fail before MVC is reached. Configure the relevant `AuthenticationEntryPoint` for authentication failures and `AccessDeniedHandler` for access denials. Preserve the meaningful 401/403 status and applicable `WWW-Authenticate` header; format safe JSON without exposing tokens or internal validation details. A CSRF rejection is not necessarily a missing role.
 
 ### 10.8 Which tests prove security beyond mocked permissions?
 
-**Answer:** test policy and credential validation separately, then cover their integration.
+**Interview setup:** the following mocked-JWT test passes. Does it prove that the API rejects forged or wrong-audience tokens?
+
+**Answer:** no; it supplies an authenticated principal rather than running cryptographic token verification. It is useful for endpoint/permission policy, but credential validation needs separate tests through the real bearer-token path.
 
 ```java
 mockMvc.perform(get("/api/orders/123")
@@ -237,7 +255,7 @@ mockMvc.perform(get("/api/orders/123")
         .andExpect(status().isOk());
 ```
 
-**Scenario:** this passes with an existing permitted-order fixture, but proves no signature, issuer or audience validation: the helper supplies an authenticated principal. Add actual signed fixture tokens through the Authorization header with isolated test keys, plus wrong-audience/issuer, expiry, invalid-signature, missing-credential and cross-tenant cases. Test chain gaps and browser protections as applicable.
+Use an existing permitted-order fixture for this positive policy test. Then send real signed fixture tokens through the Authorization header with isolated test keys, covering wrong audience/issuer, expiry, invalid signature and missing credentials. Cross-tenant tests must exercise resource policy; chain-gap tests must reach unexpected routes. Browser CORS behavior needs real-browser checks, not just mocked permissions.
 
 ## References and historical cautions
 
