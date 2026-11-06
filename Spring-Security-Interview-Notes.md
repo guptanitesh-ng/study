@@ -1,10 +1,10 @@
 # Spring Security: Interview Notes
 
-Preparation focus: **security concepts and real-world decisions first; Spring implementation second**. Use [Authentication and Authorization: Application Patterns](Authentication-Authorization-Patterns.md) as the primary guide, especially its [scenario-led study plan](Authentication-Authorization-Patterns.md#9-focused-study-plan-security-decisions-and-defenses).
+Preparation focus: **security concepts and real-world decisions first; Spring implementation second**. Use [Application Security: Practical Interview Notes](Security-Interview-Notes.md) as the primary guide, especially its [scenario-led study plan](Security-Interview-Notes.md#9-focused-study-plan-security-decisions-and-defenses).
 
 This is a compact framework companion, not a filter inventory or a configuration-memorization exercise. It retains the useful concepts from the August 2019 PDF while replacing its obsolete adapter-based recipes. Examples target **Boot 3.5 / Spring Security 6.5 Servlet applications**, omit imports/domain setup and are not an executed application. Match APIs and defaults to the actual project version.
 
-Study sequence: [Core](Spring-Core-Interview-Notes.md) -> [Boot](Spring-Boot-Interview-Notes.md) -> [REST + MVC](Spring-REST-MVC-Interview-Notes.md) -> [Data](Spring-Data-Interview-Notes.md) -> [Security concepts and scenarios](Authentication-Authorization-Patterns.md) -> this Spring companion.
+Study sequence: [Core](Spring-Core-Interview-Notes.md) -> [Boot](Spring-Boot-Interview-Notes.md) -> [REST + MVC](Spring-REST-MVC-Interview-Notes.md) -> [Data](Spring-Data-Interview-Notes.md) -> [Security concepts and scenarios](Security-Interview-Notes.md) -> this Spring companion.
 
 ## 1. Servlet security architecture
 
@@ -62,7 +62,7 @@ Do not assume arbitrary async threads inherit identity. Propagate context delibe
 
 Remember-me is persistent re-authentication, not an indefinitely valid session. Its cookies remain credentials requiring protection and lifecycle policy.
 
-Spring logout can clear context, invalidate the application session and remove configured cookies. With CSRF protection, the state-changing logout action is normally POST. Application logout, provider logout and access/refresh-token revocation are separate decisions: see [the logout and token-replay scenario](Authentication-Authorization-Patterns.md#93-i-copied-the-token-into-postman-what-happens-after-logout).
+Spring logout can clear context, invalidate the application session and remove configured cookies. With CSRF protection, the state-changing logout action is normally POST. Application logout, provider logout and access/refresh-token revocation are separate decisions: see [the logout and token-replay scenario](Security-Interview-Notes.md#93-i-copied-the-token-into-postman-what-happens-after-logout).
 
 ## 6. CORS: browser permission, not authorization
 
@@ -78,7 +78,7 @@ For session-based SPAs, follow the version-appropriate token repository/request-
 
 A bearer-only API with explicitly attached credentials and no ambient fallback can have a different CSRF policy. XSS still matters: HttpOnly blocks direct cookie reading, not every action malicious same-origin script can perform.
 
-Use the [scenario plan](Authentication-Authorization-Patterns.md#9-focused-study-plan-security-decisions-and-defenses) for the threat models; use Spring documentation for the exact integration.
+Use the [scenario plan](Security-Interview-Notes.md#9-focused-study-plan-security-decisions-and-defenses) for the threat models; use Spring documentation for the exact integration.
 
 ## 8. Spring integration map
 
@@ -90,23 +90,23 @@ Use established integrations. Do not implement OAuth by writing a controller tha
 
 ### 8.2 Pattern A: application-owned login and server session
 
-[Pattern A](Authentication-Authorization-Patterns.md#2-pattern-a-application-owned-login-and-server-session) maps to `formLogin`, a password provider, `UserDetailsService`, `PasswordEncoder` and session context persistence. Section 2 shows the configuration shape. Keep CSRF and session protections.
+[Pattern A](Security-Interview-Notes.md#2-pattern-a-application-owned-login-and-server-session) maps to `formLogin`, a password provider, `UserDetailsService`, `PasswordEncoder` and session context persistence. Section 2 shows the configuration shape. Keep CSRF and session protections.
 
 ### 8.3 Pattern B: enterprise OIDC login with a backend session
 
-[Pattern B](Authentication-Authorization-Patterns.md#3-pattern-b-external-oidc-login-with-a-backend-session) maps to `spring-boot-starter-oauth2-client` and `http.oauth2Login(Customizer.withDefaults())`.
+[Pattern B](Security-Interview-Notes.md#3-pattern-b-external-oidc-login-with-a-backend-session) maps to `spring-boot-starter-oauth2-client` and `http.oauth2Login(Customizer.withDefaults())`.
 
 Configure client registration, trusted issuer, `openid` scope, exact callback URI and provider-compatible client/PKCE settings. The login integration validates the OIDC response and establishes a session. A complete BFF also needs server-side token storage, downstream scopes/audience, an outbound client and browser/session protections.
 
 ### 8.4 Pattern C: SPA obtains a token and calls the resource server
 
-[Pattern C](Authentication-Authorization-Patterns.md#4-pattern-c-spa-obtains-a-token-and-calls-the-resource-server) maps to `spring-boot-starter-oauth2-resource-server` and `http.oauth2ResourceServer(resource -> resource.jwt(Customizer.withDefaults()))`.
+[Pattern C](Security-Interview-Notes.md#4-pattern-c-spa-obtains-a-token-and-calls-the-resource-server) maps to `spring-boot-starter-oauth2-resource-server` and `http.oauth2ResourceServer(resource -> resource.jwt(Customizer.withDefaults()))`.
 
 Configure the trusted issuer, API audience, key/algorithm policy and authority conversion. Validate claims in addition to the signature. The API does not need `oauth2Login` for this role. A bearer-only chain may use `STATELESS`; justify CSRF policy from credential transport and configure CORS separately.
 
 ### 8.5 Pattern D: service-to-service client credentials
 
-[Pattern D](Authentication-Authorization-Patterns.md#5-pattern-d-service-to-service-client-credentials) maps to OAuth2 Client support on the caller and Resource Server support on the receiver.
+[Pattern D](Security-Interview-Notes.md#5-pattern-d-service-to-service-client-credentials) maps to OAuth2 Client support on the caller and Resource Server support on the receiver.
 
 Register the `client_credentials` grant and supported client authentication. Use `OAuth2AuthorizedClientManager` to acquire/manage tokens, then wire it into the outbound client. For workers outside a Servlet request, `AuthorizedClientServiceOAuth2AuthorizedClientManager` is a suitable implementation. Declaring a manager alone sends no request.
 
@@ -122,7 +122,7 @@ Register the `client_credentials` grant and supported client authentication. Use
 
 ## OAuth, OIDC, JWT and opaque tokens: Spring integration
 
-The [companion guide](Authentication-Authorization-Patterns.md#6-oauth-oidc-jwt-and-opaque-tokens-different-layers) owns the protocol distinctions and trade-offs.
+The [companion guide](Security-Interview-Notes.md#6-oauth-oidc-jwt-and-opaque-tokens-different-layers) owns the protocol distinctions and trade-offs.
 
 JWT Resource Server support uses a `JwtDecoder` and validators. Opaque-token support uses an `OpaqueTokenIntrospector` configured with the provider's introspection endpoint and API credentials. In either case, enforce intended-resource and permission policy; successful validation is not universal authorization. Verify provider support rather than assuming introspection exists.
 
@@ -130,7 +130,7 @@ JWT Resource Server support uses a `JwtDecoder` and validators. Opaque-token sup
 
 Injection, SSRF, browser attacks, credential theft, multi-tenant isolation, abuse prevention, dependency/configuration risks and AI/tool authorization are not solved merely by installing Spring Security.
 
-Study them through [the focused plan](Authentication-Authorization-Patterns.md#9-focused-study-plan-security-decisions-and-defenses). Return here only to map a required control to Spring.
+Study them through [the focused plan](Security-Interview-Notes.md#9-focused-study-plan-security-decisions-and-defenses). Return here only to map a required control to Spring.
 
 ## 10. Interview questions: the Spring-specific core
 
@@ -227,7 +227,7 @@ Next request: restore from context repository → nothing saved → anonymous
 
 **Interview setup:** a React frontend on a different origin cannot read API responses. After enabling CORS, cookie-authenticated POSTs still return 403. Are these the same failure?
 
-The full explanation now lives in [Browser security: why CORS, CSRF and XSS happen](Authentication-Authorization-Patterns.md#10-browser-security-why-cors-csrf-and-xss-happen), including diagrams, request flows, defensive snippets and verification cases.
+The full explanation now lives in [Browser security: why CORS, CSRF and XSS happen](Security-Interview-Notes.md#10-browser-security-why-cors-csrf-and-xss-happen), including diagrams, request flows, defensive snippets and verification cases.
 
 **Answer:** no. CORS controls cross-origin browser response access; CSRF checks protect state changes using automatically attached credentials. Configure trusted origins and preflight handling, then wire the session-based SPA's CSRF token delivery/submission/renewal using the supported Spring version recipe. A bearer-only API has different CSRF assumptions. `permitAll` does not fix either integration, and unexplained `csrf.disable()` can remove required protection.
 

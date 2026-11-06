@@ -2,9 +2,9 @@
   "version": 1,
   "notes": [
     {
-      "path": "Authentication-Authorization-Patterns.md",
-      "title": "Authentication and Authorization: Application Patterns",
-      "bytes": 78103
+      "path": "Security-Interview-Notes.md",
+      "title": "Application Security: Practical Interview Notes",
+      "bytes": 116833
     },
     {
       "path": "Spring-Boot-Interview-Notes.md",
@@ -29,7 +29,7 @@
     {
       "path": "Spring-Security-Interview-Notes.md",
       "title": "Spring Security: Interview Notes",
-      "bytes": 21038
+      "bytes": 20875
     }
   ]
 }

@@ -1,6 +1,6 @@
-# Authentication and Authorization: Application Patterns
+# Application Security: Practical Interview Notes
 
-This is the primary security-preparation guide: framework-neutral patterns first, then a [focused scenario-led study plan](#9-focused-study-plan-security-decisions-and-defenses). Decide who owns identity, what evidence crosses each boundary and where access is enforced. Use [Spring Security: Interview Notes, section 8](Spring-Security-Interview-Notes.md#8-spring-integration-map) only for implementation mappings.
+This is the primary security-preparation guide: framework-neutral authentication patterns, practical browser and API scenarios, credential handling, transport/data protection, and operational recovery. Start with the [scenario-led study plan](#9-focused-study-plan-security-decisions-and-defenses), then explore the relevant topic. Explain why the problem occurs, where the control belongs and how to verify it. Use [Spring Security: Interview Notes, section 8](Spring-Security-Interview-Notes.md#8-spring-integration-map) only for implementation mappings.
 
 The examples are conceptual flows, not deployed applications or claims of production experience.
 
@@ -884,6 +884,336 @@ No step replaces another. CORS cannot authorize order ownership, a CSRF token is
 
 **One-minute interview answer:** "CORS, CSRF and XSS all come from automatic browser behaviour. Same-origin policy blocks cross-origin reads, so we use CORS to allowlist our own frontends; it is not access control. Browsers attach cookies automatically, so cookie-based apps need CSRF tokens; bearer tokens sent by JavaScript in a header avoid that. XSS means untrusted data runs as our origin, which defeats both, so we render safely, sanitize rich content, add CSP and keep tokens out of JavaScript's reach."
 
+## 11. Passwords and account recovery: practical failure scenarios
+
+These scenarios apply when the application owns password login, as in Pattern A or a local password-to-token flow. With external login, the provider owns password verification and recovery; the application still owns local account linking and session/access policy. Use maintained libraries, not a custom password protocol.
+
+### 11.1 Our user database leaked. Does hashing make the passwords safe?
+
+**Interview setup:** an attacker obtains the password-verifier table, but not the running application. What can they do, and how does our storage design limit the damage?
+
+```mermaid
+flowchart TD
+    Password["Password received over HTTPS"] --> Library["Password-hashing library: fresh salt and configured work factor"]
+    Library --> DB["Store encoded verifier with salt and parameters; not plaintext"]
+    DB --> Leak["Attacker obtains database copy"]
+    Leak --> Guess["Try password guesses offline against each verifier"]
+    Guess --> Cost["Salt prevents shared precomputed lookups; work factor raises cost per guess"]
+```
+
+**Why it happens:** a hash is not decryptable, but an attacker can hash guesses and compare results. Weak or reused passwords can still be found. A salt makes identical passwords produce different verifiers and frustrates shared precomputation; it is not secret and does not stop guessing one account.
+
+**Normal solution:** use a supported adaptive password-hashing algorithm such as Argon2id, or an appropriate bcrypt/scrypt/PBKDF2 configuration for the platform and requirements. Let the library generate salts and encode parameters. Benchmark the cost on deployment hardware and plan upgrades; protect backups of the verifier table too.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "Why not SHA-256? We already use it for integrity checks." | A fast general-purpose hash lets attackers try guesses cheaply. Password hashing deliberately adds computational and, for suitable algorithms, memory cost. Tune it to make guessing expensive without making normal login unusable. |
+| "Two users choose the same password. Should their stored values match?" | No; fresh salts produce different verifiers. Store the encoded verifier and use the library's password-check operation, not a newly generated salted hash compared as a string. |
+| "Why not hash in JavaScript so the server never sees a password?" | In a naive design, that browser hash becomes the replayable credential the server accepts. It does not replace HTTPS or secure server-side password verification. Specialized protocols need their own reviewed design; do not invent one. |
+| "Would an extra secret, or pepper, make the database leak harmless?" | A separately protected secret can add a barrier to offline guessing after a database-only leak. It does not make passwords uncrackable, and application/key compromise can defeat it. Availability and rotation/recovery become additional responsibilities. |
+
+**Verify:** identical passwords get different encoded verifiers; correct and incorrect passwords behave as expected; passwords/verifiers never reach logs. Measure verification cost under bounded concurrent login load, and verify that parameter upgrades preserve supported login behavior.
+
+### 11.2 A password-reset link was copied. Can it be reused?
+
+**Interview setup:** a reset link is opened twice, or two requests submit it simultaneously. A forwarded or leaked link should not become a permanent account credential.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant App
+    participant Store as Recovery-token store
+    participant Mail as Mail delivery
+    User->>App: Request password reset
+    App-->>User: Generic response regardless of account existence
+    App->>Store: For eligible account, store digest of random token, expiry and purpose
+    App->>Mail: Deliver HTTPS reset link using configured trusted base URL
+    User->>App: Submit token and new password
+    App->>Store: Atomically validate/consume token with password update
+    App->>App: Apply session policy and send account notification
+    App-->>User: Reset completed; reused token is rejected
+```
+
+**Why it happens:** whoever holds a valid reset token may be able to change the password. Long-lived, reusable, predictable or leaked tokens undermine the original password protection.
+
+**Normal solution:** use a cryptographically random, account/purpose-bound token with a short, deliberately chosen expiry and single-use enforcement. Store a digest rather than the raw token where practical; keep the token out of logs/referrers and do not build links from an untrusted request Host header. The final password change should require an explicit submission, not happen just because a link is fetched.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "Must every reset token expire after exactly fifteen minutes?" | No universal lifetime fits every product. Choose a short risk-appropriate window considering delivery delays and usability, and enforce it server-side. Expiry alone does not replace single-use behavior. |
+| "Two submissions both pass the unused-token check before either updates it. What prevents two resets?" | A separate check-then-update races. Make token consumption and the intended password update atomic, or use equivalent concurrency control so only one authorized change succeeds and failure recovery is deliberate. |
+| "The token is a signed JWT. Can we avoid recovery state entirely?" | A signature protects integrity, not one-time use. Strict single-use or revocation still needs an enforced state/version mechanism. Do not accept a reset token as an API access token. |
+| "Does resetting the password automatically end all existing access?" | Not necessarily. Decide which sessions and refresh credentials to revoke, and how issued access tokens are rejected or expire. Notify the account owner; do not promise immediate cutoff unless it is enforced. |
+
+**Verify:** expired, altered, wrong-purpose and reused tokens fail; concurrent submissions permit only the intended change. Check that link previews cannot change the password, and synthetic reset tokens are redacted from logs and analytics.
+
+### 11.3 Both login failures say the same thing. Why can accounts still be discovered?
+
+**Interview setup:** unknown usernames return almost immediately, while existing usernames with a wrong password take much longer. Both responses say "Invalid credentials." Does that hide account existence?
+
+```mermaid
+flowchart TD
+    Login["Login attempt"] --> Lookup{"Account found?"}
+    Lookup -->|Yes| Real["Verify supplied password against stored verifier"]
+    Lookup -->|No| Dummy["Perform comparable verification with a fixed dummy verifier"]
+    Real --> Deny["On failure: generic response and consistent response shape"]
+    Dummy --> Deny
+    Deny --> Limits["Bound attempts; monitor abuse without recording passwords"]
+```
+
+**Why it happens:** an early return for an unknown account skips expensive password verification. Repeated measurements can reveal the difference even when text and status are identical. This is account enumeration; it can help target credential stuffing (trying credentials leaked elsewhere).
+
+**Normal solution:** use supported login handling that avoids obvious account-dependent shortcuts, including comparable dummy verification for missing accounts. Keep failure messages/status/body consistent where appropriate, bound attempts and monitor abuse. Apply the same reasoning to reset and registration flows; avoid claiming perfectly constant end-to-end timing.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "Would adding a random sleep hide the timing difference?" | Not reliably; repeated samples can reveal it, and sleeping adds latency/resource cost. Remove the major unequal work first, then measure distributions under realistic conditions. |
+| "Does a constant-time hash comparison solve the whole problem?" | No; it addresses comparison leakage, not a user lookup that skips hashing or a different mail/reset path. Review the complete observable flow, not only the last comparison. |
+| "Can we just lock accounts after several failures?" | It can slow guessing, but attackers may use lockout to deny legitimate users access. Combine suitable caller/account/network limits, recovery and monitoring; protect the expensive dummy-check path from unbounded load too. |
+| "Should we force complex passwords and monthly changes?" | Favor adequate length, blocked common/compromised passwords, password-manager support and suitable MFA. Routine forced changes without evidence of compromise can encourage weak variations; change credentials when risk or policy requires it. Two knowledge secrets are not two independent authentication factors. |
+
+**Verify:** in a controlled test, compare failure response shape and timing distributions for known/unknown synthetic accounts. Check login/reset rate limits and legitimate recovery behavior; a single timing sample is not evidence of either a leak or its absence.
+
+## 12. Service secrets: rotation without an outage, revocation during an incident
+
+A service secret might be a database password, API credential or private key. Public verification keys and certificate chains are not secrets; private keys are. Prefer supported managed/workload identity when possible, but still define permissions, token lifecycle and incident response. Putting a secret in a vault solves only part of its lifecycle.
+
+### 12.1 We rotated the database password. Why did half the pods fail?
+
+**Interview setup:** six API pods use one database credential. Operations changes it in the vault, but some pods retain the old value in memory and fail when they reconnect. How would you make routine rotation safe?
+
+```mermaid
+flowchart TD
+    Create["Create replacement credential with required scope"] --> Overlap{"Target supports overlapping credentials or separate principals?"}
+    Overlap -->|Yes| Enable["Enable replacement; temporarily retain old credential"]
+    Enable --> Deliver["Publish new vault version; reload or roll out consumers"]
+    Deliver --> Check["Verify every consumer and test new connections"]
+    Check --> Disable["Disable old credential; account for existing connections"]
+    Overlap -->|No| Cutover["Plan coordinated cutover / maintenance and recovery"]
+    Disable --> Monitor["Monitor authentication failures and audit usage"]
+    Cutover --> Monitor
+```
+
+**Why it happens:** changing the vault value does not update every process, connection pool or scheduled worker. Consumers and the target system must agree on the credential version during the transition.
+
+**Normal solution:** inventory consumers, use supported credential overlap where available, distribute the replacement securely, and roll out or reload consumers deliberately. Confirm new authentication works before retiring the old credential. If the target allows only one password, plan the cutover and availability impact instead of promising zero downtime.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "The app uses a vault SDK. Doesn't it always read the latest secret?" | Not necessarily; code may read only at startup, pin a version or cache indefinitely. Define refresh/reload behavior and test it. Reading on every request adds vault latency and an availability dependency; bounded caching or rollout-based updates may be more appropriate. |
+| "All pods report healthy after rotation. What else should we test?" | Existing pooled connections may still work without authenticating again. Exercise fresh connections, background jobs and autoscaled/restarted instances using the replacement; health checks alone may not prove every consumer switched. |
+| "The database supports only one password for this account. Can we use the diagram's overlap anyway?" | No. Use separate principals only if supported and authorized, or coordinate a cutover with a planned recovery path. Do not assume dual-key rotation semantics apply to every service. |
+| "Can we roll back by restoring the old credential?" | For routine rotation, only if it is still trusted and the target can safely restore it. Keep a tested recovery plan, not secrets in deployment logs. If rotation was triggered by a leak, restoring that credential reopens the incident. |
+| "Would managed identity remove this problem?" | It removes this manually managed password where the target supports identity authentication. The SDK/platform handles token acquisition, but permissions, outages, token caching and identity changes still need operational policy. |
+
+**Verify:** in a test environment, rotate while replicas and workers are active, restart one consumer, and force new authentication. Confirm the old credential is rejected after retirement and intended operations still work. Audit versions/principals and outcomes, never secret values.
+
+### 12.2 An API credential appeared in logs. Is generating a new one enough?
+
+**Interview setup:** a service credential was logged and may have been copied. The vault now holds a new value, but the old one remains valid at the provider. What still needs to happen?
+
+```mermaid
+flowchart TD
+    Leak["Credential exposed: assume copied"] --> Contain["Revoke exposed authority promptly; restrict access if needed"]
+    Contain --> Replace["Provision replacement through trusted channels"]
+    Replace --> Update["Update consumers; remove the logging/leak path"]
+    Update --> Assess["Audit misuse and affected data; address sessions/tokens already issued"]
+    Assess --> Verify["Prove old authority no longer works; monitor and recover"]
+```
+
+**Why it happens:** replacement and revocation are separate operations. An attacker can keep using an old key while the application uses a new one. Deleting a log entry cannot delete copies, and revoking a token-issuance credential may not invalidate access tokens already issued.
+
+**Normal solution:** contain exposed authority, replace it securely, repair the leak and investigate its use. During an incident, leaving a compromised credential active for a comfortable overlap may be unacceptable; prioritize containment and explicitly manage availability impact. Preserve necessary restricted audit evidence instead of blindly deleting all records.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "The secret is no longer in the repository or current logs. Why revoke it?" | Copies may survive in history, artifacts, caches or another person's client. Treat exposure as loss of secrecy; invalidate the credential at the authority that accepts it, not merely where your application stores it. |
+| "We disabled an OAuth client secret. Why do its previously issued tokens still work?" | The secret authenticated token acquisition; an issued access token is a separate credential. Apply supported token/principal revocation or current-policy checks as required, and understand the remaining expiry/cache window. |
+| "Can we guarantee no outage while revoking the leaked key?" | Not universally. It depends on alternate credentials and consumer behavior. Unlike routine rotation, unsafe overlap may prolong attacker access; use a deliberate emergency cutover and communicate the trade-off. |
+| "Should every microservice share the replacement key to simplify deployment?" | Avoid broad shared authority. Separate narrowly scoped identities/credentials where appropriate, so one compromised service does not expose every service's access. Track who owns and consumes each credential. |
+| "What if the stolen material is a JWT signing private key, not an API key?" | The attacker may mint tokens, not just replay one. Rotate signing trust through the supported incident process and consider removing the compromised key from validators/caches. Routine overlap with that key can continue to accept forged tokens; assess previously issued tokens and dependent services explicitly. |
+
+**Verify:** safely attempt old credentials against the test authority after revocation, and check separately any tokens/connections derived from them. Confirm synthetic credentials are redacted from logs and build outputs, replacements reach all consumers, and security events identify misuse without exposing the new secret.
+
+## 13. Transport and internal trust: HTTPS, mTLS and private networks
+
+TLS protects a connection in transit and normally authenticates the server to the client. Mutual TLS (mTLS) also authenticates the client with a certificate. Neither mechanism decides which tenant's orders a caller may access; that remains authorization.
+
+### 13.1 The browser shows HTTPS. Is the request encrypted all the way to our service?
+
+**Interview setup:** a shopping portal uses HTTPS, but its ingress terminates TLS and forwards HTTP to the order service. A reviewer asks whether credentials and order data remain encrypted throughout the path.
+
+```mermaid
+flowchart LR
+    Browser["Browser"] -->|TLS connection 1| Edge["Ingress: decrypts request"]
+    Edge -->|Plain HTTP if configured| Service["Order service"]
+    Service -->|Separate database connection| DB["Database"]
+```
+
+**Why it matters:** TLS protects only the connection on which it is used. The browser's HTTPS indicator says nothing about the ingress-to-service or service-to-database hop. Plaintext also exists at termination points, where logs and local access can expose it.
+
+**Normal solution:** map every sensitive hop and choose its transport policy deliberately. If the internal hop requires encryption, re-encrypt from ingress to service and verify the service's certificate; configure database/broker TLS separately. Alternatively, supported TLS passthrough keeps that connection encrypted to the backend, but changes which layer can inspect and route HTTP.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "Can we enable TLS upstream but disable certificate checks because the service is internal?" | That may encrypt traffic without establishing who is at the other end. Validate the trusted certificate chain and intended hostname/service identity using the supported mechanism; configure internal trust rather than accepting any certificate. |
+| "The ingress needs to route by URL and inspect requests. Can it simply pass TLS through?" | Not while inspecting encrypted HTTP itself. Termination permits HTTP-layer routing and inspection; passthrough typically has less information, such as TLS server-name metadata. Choose routing and security requirements together. |
+| "Does a signed JWT make HTTP acceptable on the internal hop?" | A signature protects token integrity, not confidentiality. A captured bearer token can be replayed, and request/response data may be readable. Protect transport independently of token validation. |
+| "The certificate expires during a rollout. Does replacing the file fix every connection?" | Only if each endpoint reloads or restarts as required and trust remains compatible. Automate renewal, monitor expiry and test new handshakes; existing connections can hide a broken replacement until reconnection. |
+| "What if the service logs the token after TLS termination?" | TLS does not protect against an endpoint recording plaintext. Redact credentials and sensitive data, restrict log access and retention, and review termination/proxy logs as well as application logs. |
+
+**Verify:** inspect actual ingress/upstream/database settings and exercise new connections with valid, expired and untrusted certificates in a test environment. Confirm unsupported trust is rejected and sensitive headers are absent from logs. Do not infer end-to-end encryption from the browser padlock.
+
+### 13.2 Both services are inside the cluster. Why authenticate them with mTLS?
+
+**Interview setup:** the order API trusts calls from the private network. A compromised reporting pod can reach it and perform administrator operations. Would mTLS solve this?
+
+```mermaid
+sequenceDiagram
+    participant Caller as Calling workload
+    participant Transport as Receiving TLS endpoint or mesh proxy
+    participant API as Order API
+    Caller->>Transport: TLS handshake with client certificate
+    Transport->>Transport: Validate trusted chain and intended workload identity
+    Transport-->>Caller: Authenticated TLS connection
+    Caller->>Transport: Request over encrypted connection
+    Transport->>API: Request through protected, configured identity path
+    API->>API: Enforce allowed caller, operation and resource
+    API-->>Caller: Permit or deny
+```
+
+**Why it happens:** network reachability is not proof of application identity or permission. A compromised workload may have the same network access as a legitimate caller. Zero-trust reasoning means not granting blanket authority solely because a request is internal.
+
+**Normal solution:** authenticate workloads using an appropriate mechanism, such as mTLS or intended API tokens, then authorize specific operations/resources. Combine this with network segmentation and least privilege. mTLS requires trusted certificate issuance, private-key protection, renewal and explicit identity policy; trusting any certificate from a broad CA is not enough.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "A client has a valid certificate from our CA. Should every endpoint allow it?" | No; that establishes only an identity within the configured trust system. Map the workload identity to allowed operations and resource scope, and distinguish a reporting service from an administrator service. |
+| "Our service mesh provides mTLS. Can the API trust a caller-identity header?" | Only through a protected and explicitly configured proxy path that prevents callers injecting identity or bypassing the trusted endpoint. Mesh transport identity is not automatically an application authorization rule; ensure policies and direct access paths agree. |
+| "Do we need both mTLS and an access token?" | Not universally. mTLS may supply workload identity; tokens may supply API permissions or delegated user context. Choose the evidence each boundary needs. Ordinary mTLS alone does not automatically bind a bearer token to that certificate; token binding needs explicit support and enforcement. |
+| "What if the reporting pod is compromised but still has its legitimate certificate?" | mTLS can still authenticate it as the reporting workload. Limit its permissions, isolate its network reach and contain/revoke its identity during the incident; authentic identity does not prove benign behavior. |
+| "Does managed identity mean our HTTP connection is already mutual TLS?" | No. Managed identity can obtain a resource access token without a manually managed secret. That is separate from whether the service connection uses TLS or client-certificate authentication; configure the required transport protections independently. |
+
+**Verify:** test no client certificate, an untrusted certificate and a trusted but unauthorized workload. Confirm permitted calls work, reporting identity cannot perform administrator actions, direct/proxy bypass paths do not grant trust, and certificate rotation/recovery behave as documented.
+
+## 14. Data protection: what encryption does and does not solve
+
+Choose controls from the exposure being addressed: stolen storage, an unauthorized query, a compromised service, or unnecessary copies of sensitive data. Encryption, access control, masking and collecting less data solve different parts of that problem.
+
+### 14.1 The database is encrypted. Why can an API still leak another customer's data?
+
+**Interview setup:** the managed database encrypts its storage. A user changes an order ID and the API returns another tenant's address. Was encryption misconfigured?
+
+```mermaid
+flowchart LR
+    Disk["Encrypted database storage"] --> Engine["Database engine decrypts for authorized connections"]
+    Engine --> API["API's database identity can query records"]
+    API --> Missing["Missing caller / tenant resource check"]
+    Missing --> Leak["Wrong user's browser receives plaintext"]
+```
+
+**Why it happens:** transparent encryption at rest protects stored bytes under its threat model. The running database deliberately returns readable values to authorized connections. It does not know whether the application's current browser user may read a particular order.
+
+**Normal solution:** keep storage encryption, but enforce caller/tenant rules in the application/query boundary and use least-privilege database identities. Protect the response in transit and avoid unnecessary sensitive fields in APIs, logs and exports. Do not treat one encryption checkbox as proof of end-to-end confidentiality.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "What does encryption at rest protect if queries still return plaintext?" | It can protect stolen disks, snapshots or storage copies when the attacker lacks the decryption capability. It does not by itself stop queries through a privileged connection or a compromised application that has access. |
+| "Could encrypting individual address fields fix the missing ownership check?" | Not if the same service can decrypt every address and returns the wrong one. Field encryption helps only against actors who cannot use the relevant keys/decryption path; enforce resource access independently. |
+| "Should encryption keys live beside the database backup?" | Not with equivalent unrestricted access: stealing both may defeat the protection. Use a protected key-management system, deliberate permissions and a recovery plan; losing required keys can make legitimate recovery impossible. |
+| "Could we use separate tenant keys instead of query restrictions?" | Separate keys can narrow exposure if access to them is actually isolated, but key selection, rotation and recovery become more complex. A service allowed to use all keys can still misuse them; tenant authorization remains required. |
+| "The normal response is safe, but an error log includes the full record. Is encryption enough?" | No; that creates another plaintext copy outside the database control. Redact or omit sensitive values, restrict telemetry access/retention, and test error paths and exports as well as successful responses. |
+
+**Verify:** test cross-tenant reads and exports, database identity permissions and sensitive-response fields. Inspect configured storage/backup encryption and key permissions separately. Use synthetic records to check that errors and logs do not create unintended plaintext copies.
+
+### 14.2 We mask customer details in the UI. Does that protect the underlying data?
+
+**Interview setup:** a support screen shows only the last four characters of an identifier. The browser's network response still contains the full value. What has masking actually protected?
+
+```mermaid
+flowchart TD
+    Need{"Does this use case need the full value?"} -->|No| Min["Do not collect it, or omit/redact it before the response"]
+    Need -->|Yes| Access["Authorize who may retrieve or reveal it"]
+    Access --> Encryption["Protect retained data and decryption capability"]
+    Encryption --> Output["Return only the required representation"]
+    Output --> Copies["Apply policy to logs, exports, caches and backups too"]
+```
+
+**Why it happens:** presentation masking hides what is drawn on screen, not data already delivered to the client. A user can inspect the response. Encryption transforms stored data using a key; masking obscures a representation; neither automatically proves the original value is inaccessible.
+
+**Normal solution:** derive the least-sensitive response on the server and send only what the use case needs. Make full-value reveal an explicit authorized operation where required. Retain sensitive data only for a documented purpose and period, with encryption/access controls for required copies. Less data means less material to expose.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "Can frontend masking satisfy a rule that support users must not access the full identifier?" | No; omit the full value from responses to those users. Check downloads, alternate APIs and exports too. A UI-hidden field is not an authorization boundary. |
+| "We need to show an address later. Why not hash it like a password?" | Hashing is not reversible, so it does not serve a display requirement. Use protected storage with suitable encryption/access control when retrieval is necessary. Predictable values may also be guessable from hashes; hashing is not automatically anonymization. |
+| "Would field-level encryption be worth the extra work?" | Use it when it addresses a defined threat, such as database operators or storage readers lacking decryption permission. It complicates indexing, search, key rotation and recovery; a compromised service with decryption rights may still read the data. |
+| "Our users need search by a sensitive field. Can we just encrypt it and keep every query unchanged?" | Usually not. Ordinary ciphertext does not support the same lookup/search semantics. Evaluate minimum search needs and carefully designed indexes or tokenization, including information leakage and key access; avoid inventing an encryption scheme. |
+| "We deleted the primary record. Are its sensitive details gone everywhere?" | Not necessarily: logs, caches, exports and backups may retain copies. Define retention and deletion across those systems, legal holds where applicable and what happens on restoration; do not promise instant erasure from every backup without an implemented mechanism. |
+
+**Verify:** inspect actual network payloads under restricted roles, not just screenshots. Test full-value reveal authorization and exports, and document retention for each copy. Exercise encryption-key recovery with synthetic data where encryption is used.
+
+## 15. Patching and recovery: managed infrastructure is not the whole solution
+
+Security includes keeping deployed software supported and recovering trusted operations after failure or compromise. A successful build, a managed-cluster label and a green backup job are evidence about different things; none proves the running service is safe or recoverable.
+
+### 15.1 Our cluster is managed. Why is the application still running a vulnerable image?
+
+**Interview setup:** a dependency scanner flags a vulnerable library or base-image package in the order service. The cluster is managed by a cloud provider, and the image has not changed for months. Who fixes it?
+
+```mermaid
+flowchart TD
+    Finding["Advisory or scan finding"] --> Inventory["Identify affected deployed image, package and exposure"]
+    Inventory --> Ownership["Separate provider, node, image and application responsibilities"]
+    Ownership --> Update["Update supported dependency/base image and rebuild from reviewed inputs"]
+    Update --> Check["Test behavior and scan the replacement"]
+    Check --> Deploy["Roll out new image; verify replicas and scheduled workers"]
+    Deploy --> Retire["Retire affected versions; monitor and keep a safe recovery plan"]
+```
+
+**Why it happens:** managing the control plane does not patch every customer image or application dependency. Responsibilities for worker-node updates also depend on the service and configuration. An immutable container image stays unchanged until a replacement is built and deployed.
+
+**Normal solution:** maintain an inventory of deployed versions and responsibility for each layer. Assess exposure, prioritize fixes and rebuild supported images through the delivery pipeline. Verify the replacement is actually running everywhere; installing a fix in one container is neither durable nor fleet-wide remediation.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "The Dockerfile uses a current base-image tag. Why might our running pods still be vulnerable?" | Existing pods run the image already built and deployed. A moved tag does not rewrite it, and caches/pull policy can affect rebuilds. Update the reviewed base reference, rebuild, identify the resulting image digest and verify deployment of that artifact. |
+| "Would pinning image digests prevent vulnerable software?" | It makes the chosen artifact explicit and reproducible, not permanently safe. Track advisories and deliberately update pinned inputs; review build provenance and integrity alongside vulnerability findings. |
+| "A scanner gives the library a high severity. Must every deployment stop immediately?" | Assess the affected version, actual use/exposure and available remediation without dismissing severity. Set risk-based response targets and document temporary mitigations/exceptions; neither scanner rank nor a clean scan alone proves exploitability or safety. |
+| "Why not run a package upgrade inside each live container?" | It creates drift that disappears on replacement and is hard to reproduce or audit. Rebuild and roll out the corrected image; use deliberate temporary containment when an urgent incident cannot wait for the full rollout. |
+| "The replacement breaks production. Can we roll back to the vulnerable version?" | Treat that as a risk decision, not an automatic safe rollback. Prefer a compatible fixed artifact; if temporary rollback is necessary, constrain exposure, document the exception and complete remediation. Check database/migration compatibility separately. |
+
+**Verify:** compare deployed digests and dependency inventories across replicas, jobs and workers. Test the upgraded application's supported behavior, rollout/restart paths and alerts. Confirm that rebuilding and autoscaling do not reintroduce the affected artifact.
+
+### 15.2 Backup jobs are green. Can we recover after a compromise?
+
+**Interview setup:** an attacker deletes production data and accessible backups. A remaining encrypted backup exists, but the team has never restored it and cannot locate the required key. What did the successful backup jobs fail to prove?
+
+```mermaid
+flowchart TD
+    Data["Required durable state"] --> Backup["Back up with defined retention and recovery targets"]
+    Backup --> Isolate["Protect copies and keys; separate deletion authority"]
+    Isolate --> Restore["Regular isolated restore exercise"]
+    Restore --> Check["Check integrity, application/schema compatibility and key availability"]
+    Check --> Incident["During incident: contain, choose trustworthy recovery point"]
+    Incident --> Rebuild["Rebuild from reviewed artifacts; rotate exposed authority"]
+    Rebuild --> Recover["Restore, validate access/data, then resume deliberately"]
+```
+
+**Why it happens:** writing a backup is not proving it can be read, decrypted and used by the application. If the same compromised identity can destroy production and every backup, the recovery boundary offers little isolation. A recent copy may also contain corrupted data.
+
+**Normal solution:** define **RPO** (acceptable data loss measured back to the recovery point) and **RTO** (target time to restore the required service). Protect copies with suitable separate permissions and supported immutability/isolation, protect and retain needed keys, and rehearse restoration. After compromise, contain the incident and restore into a trustworthy environment rather than merely restarting the affected pods.
+
+| Interviewer follow-up | Practical answer |
+| --- | --- |
+| "Everything is in Git and infrastructure-as-code. Do we still need backups?" | Source and deployment definitions can rebuild infrastructure, not recreate orders, uploaded documents or other durable state. Identify what must be backed up and what can safely be regenerated; recovery also needs accessible artifacts, configuration and required keys. |
+| "Our RPO is fifteen minutes and our RTO is one hour. Does a nightly backup satisfy that?" | Not by itself. Its recovery-point gap can exceed fifteen minutes; point-in-time recovery or another mechanism may be needed. Measure end-to-end restore and validation time, not just file download time, to assess the one-hour target. |
+| "The backup is encrypted. Can we keep the key indefinitely out of the recovery plan?" | No; without the required key/version the data may be unrecoverable. Design authorized key recovery without giving production's compromised identity unrestricted access to both copies and decryption material. Test recovery after rotation as well. |
+| "Does immutable backup storage solve ransomware recovery?" | It can reduce deletion/tampering within its supported policy, but does not guarantee a clean recovery point or usable application state. Validate retention, access, integrity and restoration; account for compromised administrators and provider capabilities in the threat model. |
+| "Can we recover by deleting pods and restoring the latest database snapshot?" | Only after understanding and containing the compromise. Persistent malicious configuration, images, credentials or corrupted data can survive that action. Choose a trustworthy recovery point, rebuild from reviewed inputs, rotate exposed authority and validate data, permissions and integrations before reopening. |
+
+**Verify:** restore synthetic representative data in an isolated environment, including required uploads, schema and key versions. Measure data-loss and recovery-time outcomes; test that the production workload identity cannot delete protected recovery copies. Reconcile queues/external side effects so recovery does not blindly duplicate orders or payments.
+
 ## References
 
 - [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html)
@@ -893,3 +1223,10 @@ No step replaces another. CORS cannot authorize order ownership, a CSRF token is
 - [Token introspection](https://www.rfc-editor.org/rfc/rfc7662)
 - [JSON Web Key](https://www.rfc-editor.org/rfc/rfc7517)
 - [Spring implementation notes](Spring-Security-Interview-Notes.md)
+- [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
+- [OWASP Forgot Password Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html)
+- [OWASP Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)
+- [OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)
+- [OWASP Transport Layer Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html)
+- [OWASP Cryptographic Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html)
+- [OWASP Vulnerable Dependency Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Vulnerable_Dependency_Management_Cheat_Sheet.html)
