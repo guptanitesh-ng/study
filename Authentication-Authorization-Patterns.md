@@ -369,6 +369,7 @@ The BFF redeems the login code, stores OAuth tokens server-side and gives the br
 | "If the BFF keeps tokens on the server, can injected JavaScript still place an order?" | Yes; it can call the BFF from the victim's page and the browser attaches the session cookie. HttpOnly blocks direct cookie reads, not these actions. Safe rendering and appropriate CSRF defenses remain necessary; the BFF principally reduces credential exfiltration. |
 | "Why use PKCE instead of putting a client secret in the SPA?" | Anything shipped to the browser can be inspected. PKCE uses a fresh verifier and its challenge so an intercepted authorization code cannot be redeemed without that verifier. It does not protect an already stolen access token or replace login-correlation checks. |
 | "Our browser call fails, but the same token works in Postman. Should we relax API authentication?" | No; compare actual credential delivery and inspect CORS/preflight errors. Postman does not enforce browser response-access rules. Fix the allowed-origin/header configuration or frontend request, while keeping API authentication intact. |
+| "Our SPA adds a bearer token automatically on every API call. Why might its API not need CSRF tokens, while a session-cookie API does?" | The SPA's interceptor explicitly adds the token to requests it makes; it does not run when a separate attacker site makes a request. The browser may attach a matching cookie to an attacker-induced request without the attacker knowing its value. A bearer-only API must reject requests without that header even if cookies are present. An attacker with a stolen bearer token can replay it; that is a different threat. See the [request flow](#102-csrf-why-a-logged-in-users-browser-can-be-used-against-them). |
 | "Our order API also calls a billing API. Can it simply pass through the incoming access token?" | Only if billing is an intended audience and the delegation policy permits that use. Otherwise acquire a suitable downstream token. A service acting as itself uses application authority, which is different from carrying the user's restricted authority. |
 
 **Check the design:** trace the credential on each hop, reject a mismatched login callback, and verify that unauthenticated API calls fail in both designs. Never log the credentials while tracing.
@@ -606,6 +607,8 @@ sequenceDiagram
 
 A request with JSON content type, an `Authorization` header or a method such as `PUT`/`DELETE` requires preflight. A request meeting the browser's CORS-safelisted conditions needs no preflight: **it can reach the server and execute before the browser blocks JavaScript from reading the response**.
 
+**Preflight in plain language:** before sending a request that is not CORS-safelisted, the browser sends `OPTIONS` asking whether this origin may use the requested method and headers. If the check fails, the browser does not send that preflighted request. Passing preflight is not authentication: the actual request still needs normal credential and authorization checks.
+
 ```http
 OPTIONS /orders/123 HTTP/1.1
 Origin: https://app.example.com
@@ -618,6 +621,34 @@ Access-Control-Allow-Methods: GET
 Access-Control-Allow-Headers: Authorization
 Vary: Origin
 ```
+
+**When an error is reported, decide before adding permission:**
+
+```mermaid
+flowchart TD
+    Error["Browser reports a CORS error"] --> Inspect["Check page origin, target URL, method and Network trace"]
+    Inspect --> Intended{"Is this browser origin meant to read this resource?"}
+    Intended -->|No| Reject["Do not allow it; fix unintended caller or URL"]
+    Intended -->|Yes| Same{"Can UI and API use one browser-visible origin?"}
+    Same -->|Yes| Route["Route /api through gateway or BFF; no CORS for that hop"]
+    Same -->|No| Allow["Target server allowlists exact trusted origin, methods and headers"]
+    Inspect --> Misdiagnosis{"Is it actually a bad URL, redirect, failed OPTIONS or error response without CORS headers?"}
+    Misdiagnosis -->|Yes| Fix["Fix routing, preflight handling or response headers; do not broaden access"]
+```
+
+Shared ownership is not itself a reason to trust every origin: a compromised or lower-trust sibling app should not automatically read a protected API. Add only the origins that need browser access.
+
+**Public site does not mean every endpoint is public:**
+
+```text
+Shopping UI → GET /products       → may be public
+            → GET /my-orders      → authenticated and ownership-checked
+            → POST /checkout      → authenticated or session-bound; CSRF if cookie-authenticated
+```
+
+If these UI/API requests share one origin, none needs CORS. If a deliberately public, non-credentialed product API is intended for any website, `Access-Control-Allow-Origin: *` can be appropriate for that resource. For a separate protected API, allow the intended frontend origin; use explicit origins plus `Access-Control-Allow-Credentials: true` only when cross-origin cookies are deliberately part of the design. CORS permission never makes a protected endpoint anonymous or authorizes access to another user's data.
+
+**Cross-origin resources are not all treated alike:** CORS is commonly needed when JavaScript `fetch`/XHR reads a response, and module scripts and web fonts use CORS-enabled loading. Classic scripts and ordinary images can generally be embedded cross-origin without granting the embedding page general response-reading access. A cross-origin image drawn to canvas cannot have its pixels read/exported unless it was loaded with CORS approval. Navigation and ordinary form submission can also send requests without CORS approval; the same-origin policy limits reading the resulting document. Resource-specific browser rules apply.
 
 **What we normally do:**
 
@@ -682,6 +713,20 @@ sequenceDiagram
 | JWT stored in a cookie | Yes again, because it is a cookie | Treat it as a cookie-based session |
 
 The token format is irrelevant. What matters is whether the browser supplies the credential **automatically**.
+
+**Why an interceptor is different from a cookie:** imagine a bearer-only API that ignores cookies and cached browser authentication. The victim's SPA uses JavaScript to add its access token to its own requests. An attacker page on a separate origin can cause a request to the API, but the SPA's interceptor does not run for that request and the attacker cannot normally read the victim's token.
+
+```text
+Legitimate SPA  -> app interceptor adds bearer token -> API authenticates request
+Attacker page   -> induces request to API             -> no app interceptor, no victim bearer
+Attacker page   -> induces request to cookie API      -> browser may attach matching cookie*
+```
+
+`*` Cookie attachment depends on attributes such as `SameSite`, request type, credentials mode and browser policy. The SPA's JavaScript is not secret; the relevant boundary is access to the victim's token and authenticated context. An attacker can provide their own token, but it represents their identity, not the victim's.
+
+**Follow-up: what if the attacker steals the victim's bearer token?** They can replay it from their own client, just as a developer can use their own test token in Postman. CSRF protection is not a substitute for protecting tokens, limiting their lifetime and permissions, or applying revocation/sender-constrained tokens where appropriate. XSS can let attacker code act within the application's origin; untrusted input that makes the SPA itself initiate authenticated requests can also invalidate the bearer-only assumption. Reassess if the API adds a cookie, HTTP Basic or another automatically supplied authentication fallback.
+
+**Verify:** in a controlled browser test, trigger a state-changing request from an untrusted origin. A session endpoint should reject it without valid CSRF proof, even when its cookie is eligible to be sent. A bearer-only endpoint should reject it without the header, even if a session cookie is present; a legitimate request with a valid token should still succeed subject to authorization. CORS is not authentication: separately test non-browser callers and preflight versus requests that do not require it.
 
 **What we normally do (session-based SPA):**
 
