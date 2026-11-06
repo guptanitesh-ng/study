@@ -133,7 +133,42 @@ The portal may still need current domain data: "can read orders" does not mean "
 | "Google login succeeded. Does that give the user access to every order in our app?" | No; Google establishes identity, while our app checks membership and order ownership. Trusted provider roles can contribute to permission checks, but cannot infer our resource relationships. |
 | "Google returns the same email as an existing local account. Should we merge them automatically?" | Not merely because the strings match. Identify the external account using the trusted issuer and subject, and require a deliberate account-linking process with appropriate proof of control; email may change or have different assurance across providers. |
 | "Login starts on pod A, but the callback reaches B. Why does it fail before the user has an app session?" | B may lack the saved authorization request and verifier that prove this callback belongs to the login A started. Make that correlation state accessible across pods; after login, the application session and server-held API credentials also need the appropriate shared storage. |
-| "We cleared the app session, but clicking Sign in immediately logs the user in again. Is logout broken?" | Not necessarily: the provider's separate login session may still be active. Decide whether logout means leaving only this app or also requesting provider logout and credential revocation; clearing one session does not end every layer. |
+| "We cleared the app session, but clicking Sign in immediately logs the user in again. Is logout broken?" | Not necessarily: local logout can correctly end the app session while the provider still remembers the user through its own cookie. Clicking Sign in starts a new authorization flow; the provider reuses its login session and the app creates a new session. This is SSO, not necessarily a surviving app session. See the flow and verification below. |
+
+**Practical walkthrough of that logout question:** the application and the identity provider own separate sessions. A cookie for `app.example.com` identifies the app session; a cookie on the provider's login domain identifies the provider session. The app cannot read or directly delete the provider's cookie.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Browser
+    participant App as Application backend
+    participant IdP as Identity provider
+    User->>App: Log out
+    App->>App: Invalidate application session
+    App-->>Browser: Expire application cookie
+    Note over Browser,IdP: Provider session remains active
+    User->>App: Click Sign in
+    App-->>Browser: Redirect for a new authorization request
+    Browser->>IdP: Authorization request with provider cookie
+    IdP->>IdP: Existing session satisfies login requirements
+    IdP-->>Browser: Redirect with new authorization code
+    Browser->>App: Login callback
+    App->>IdP: Redeem code
+    IdP-->>App: Tokens
+    App->>App: Validate login evidence and create new app session
+    App-->>Browser: New application session cookie
+```
+
+The browser sends the provider cookie **to the provider**, not to the app. If that session satisfies current policy, the provider can complete the new flow without asking for credentials again. Consent, MFA or reauthentication policy can still require interaction.
+
+| Intended behavior | What to implement or explain |
+| --- | --- |
+| Leave only this application | Invalidate its session and clear its cookie. A subsequent sign-in may deliberately reuse provider SSO. |
+| Also end the provider session | Use the provider's supported logout flow, such as OIDC RP-Initiated Logout where available. Clearing the app cookie is not provider logout. |
+| Choose a different account | Use supported account-selection behavior; selecting an account does not necessarily require fresh authentication. |
+| Require fresh authentication for a sensitive operation | Use supported controls such as OIDC `prompt=login` or `max_age`, and validate the resulting authentication evidence, including `auth_time` when required. Fresh authentication does not necessarily mean typing a password; the provider determines the method. |
+
+**Limits and verification:** provider logout does not automatically end every other application's existing session or revoke every issued access token; those require explicit supported logout/revocation mechanisms. Immediately after local logout, send a protected request using the former session ID **before starting another login flow**: it must no longer grant session-authenticated access. Then trace the new authorization redirect and callback. If they establish a new session, immediate sign-in is SSO working; if the old invalidated session still grants access, investigate logout enforcement.
 
 [Spring implementation: section 8.3](Spring-Security-Interview-Notes.md#83-pattern-b-enterprise-oidc-login-with-a-backend-session).
 
