@@ -6,14 +6,6 @@ The source is mostly Spring transaction management, ORM integration and JDBC, wi
 
 Study sequence: [Core](Spring-Core-Interview-Notes.md) -> [Boot](Spring-Boot-Interview-Notes.md) -> [REST + MVC](Spring-REST-MVC-Interview-Notes.md) -> **Data** -> [Security](Spring-Security-Interview-Notes.md).
 
-## Relevance and original-topic coverage
-
-| PDF pages | Original coverage | Assessment |
-|---|---|---|
-| 1 | Local/global transactions, `@Transactional`, propagation | High value; several details incorrectly generalize JPA behavior to all managers. |
-| 1 | Hibernate/JPA integration, shared EntityManager, repository proxies | Keep, but remove the blanket thread-safety guarantee and fixed method counts. |
-| 2 | ORM integration benefits, JDBC templates, embedded databases, translation | Keep; SimpleJdbcTemplate is obsolete, and embedded DB tests need realism checks. |
-
 ## 1. Distinguish the layers
 
 **Added foundation:**
@@ -84,6 +76,23 @@ Understand dirty reads, non-repeatable reads, phantoms and lost updates. Isolati
 
 Native Hibernate contextual-session integration remains an option. Old HibernateTemplate recipes are not the preferred general JPA approach; Hibernate-specific configuration/classes vary by framework generation.
 
+### Which API: `persist`, `merge`, or `save`?
+
+`EntityManager` has **no `save()` method**. Distinguish the standard JPA operations from Spring Data's repository method and legacy native Hibernate APIs:
+
+| API | Purpose and return value | What happens to the supplied instance? |
+| --- | --- | --- |
+| `EntityManager.persist(newEntity)` | Make a new entity managed; returns `void` | That instance becomes managed; persistence is synchronized through flush |
+| `EntityManager.merge(entity)` | Copy new/detached state into a managed instance; returns the managed instance | A detached input stays detached; use the returned instance for further tracked changes |
+| Spring Data JPA `repository.save(entity)` | Select persist or merge using entity-new detection; returns an entity | Persist path returns the supplied instance; merge path returns the managed result |
+| Legacy Hibernate `Session.save(entity)` | Native operation for transient entities, returning an identifier in older Hibernate versions | Historically makes the supplied transient instance persistent; not the modern portable JPA API |
+
+Hibernate deprecated native `save()` in 6.x and removed it in 7; recognize it in older code, not as the recommended modern equivalent of repository `save()`. Modern JPA imports use `jakarta.persistence`, not older `javax.persistence` packages.
+
+Neither an identifier nor the return from any of these operations proves commit. SQL timing depends on identifier generation, flush mode, pending changes and provider behavior. **Merge is not a guaranteed SELECT-then-UPDATE sequence or a database upsert.** It may reuse a managed instance already in the persistence context, load state when needed, or persist a genuinely new entity. Do not assume a missing detached row is inserted: Hibernate 6.6+ reports an optimistic-lock failure when it can identify the entity as definitely detached (for example, through a generated ID or a non-primitive version).
+
+**What if the entity is already managed?** JPA ignores the merge operation for that entity's own state and returns the managed instance; merge can still cascade to relationships configured with `MERGE` or `ALL`. Do not describe this as a mandatory copy onto itself or promise zero SQL across the whole graph. In an ordinary writable transaction, changing the managed entity is enough for dirty checking; an extra `merge()` or repository `save()` is not needed just to persist those changes.
+
 ## 5. Spring Data repositories
 
 `JpaRepository<Entity, ID>` supplies JPA-specific repository functionality. Do not memorize the PDF's "18 inherited methods"; interfaces and inheritance have changed over releases.
@@ -97,12 +106,59 @@ Repositories can be discovered through Boot auto-configuration or explicit `@Ena
 - Derived query methods, `@Query` JPQL, native SQL, parameter binding and query validation.
 - Projections/DTOs, Specifications or another query-composition approach where appropriate.
 - Custom repository fragments for queries/operations that do not fit a derived method.
-- `Page` versus `Slice`: `Page` commonly requires a total-count query; `Slice` primarily reports whether more data exists.
+- `Page` versus `Slice`: `Page` exposes totals and commonly requires a count query; `Slice` reports whether more data exists without requiring totals. See the practical comparison below.
 - Stable sorting and bounded pagination; consider keyset scrolling for large datasets when supported.
 - `save` chooses persist or merge based on entity-new detection, not "always insert" or "always immediately execute SQL". Use its return value, especially when merge is involved.
 - Bulk update/delete can bypass entity lifecycle/dirty checking and leave managed state stale; consider flush/clear strategy and transaction boundaries.
 
 Inherited CRUD methods have default transaction settings in the JPA implementation. Declared query methods do not all inherit transactional configuration by default. The outer service transaction governs participating operations; do not assume every repository annotation starts a separate transaction.
+
+### `Page` versus `Slice`: totals or just "load more"?
+
+These are Spring Data result abstractions, not JPA specification types. `Pageable` supplies the requested page, size and sorting; the repository return type determines which result metadata is needed.
+
+| Question | `Page<T>` | `Slice<T>` |
+| --- | --- | --- |
+| What does the caller know? | Content, current page, whether more exists, total elements and total pages | Content, current slice and whether more exists; no totals contract |
+| Typical paged query work | Data query plus a count query when needed | Data query fetching up to `size + 1` rows to detect another slice |
+| Useful methods | `getContent()`, `getNumber()`, `hasNext()`, `hasPrevious()`, `getTotalElements()`, `getTotalPages()` | `getContent()`, `getNumber()`, `hasNext()`, `hasPrevious()`; no `getTotalElements()` or `getTotalPages()` |
+| Typical UI | "247 results, page 1 of 25" | Infinite scroll or a "Load more" button |
+| Main trade-off | Totals can add significant database work | Avoids the total count, but does not remove other query costs |
+
+`Page` extends `Slice`, adding totals. A `Page` does **not always mean exactly two SQL statements**: Spring Data can skip the count when it can infer the total from an incomplete result page. Lazy association loading can also add queries for either result type.
+
+**Repository example:** assume the existing `PurchaseOrder` entity has a String `status` and a unique `id`. The method names differ so both signatures can coexist; Java cannot overload a method by return type alone.
+
+```java
+Page<PurchaseOrder> findPageByStatus(String status, Pageable pageable);
+
+Slice<PurchaseOrder> findSliceByStatus(String status, Pageable pageable);
+```
+
+```java
+Pageable request = PageRequest.of(0, 10, Sort.by("id").ascending());
+Page<PurchaseOrder> page = orders.findPageByStatus("OPEN", request);
+Slice<PurchaseOrder> slice = orders.findSliceByStatus("OPEN", request);
+```
+
+The calls above illustrate alternatives; a real endpoint normally chooses one, not both. Page numbering starts at zero. With page size 10, representative SQL is:
+
+```sql
+-- Page: requested rows, plus a separate count when needed.
+SELECT * FROM purchase_order
+WHERE status = 'OPEN' ORDER BY id LIMIT 10 OFFSET 0;
+SELECT COUNT(*) FROM purchase_order WHERE status = 'OPEN';
+
+-- Slice alternative: look ahead by one row; no total-count query required.
+SELECT * FROM purchase_order
+WHERE status = 'OPEN' ORDER BY id LIMIT 11 OFFSET 0;
+```
+
+Actual SQL syntax depends on the database/dialect. If the slice query returns 11 rows, Spring Data returns the first 10 and sets `hasNext()` to true. If it returns 10 or fewer, `hasNext()` is false. The look-ahead row is not exposed as an extra result.
+
+**Performance reasoning:** an expensive count can dominate a filtered or joined query, so removing it can help. Do not promise that `Slice` is always faster or that `COUNT(*)` always scans the whole table; filters, indexes, query plans and database behavior matter. Complex page queries may require an explicit `countQuery` that counts the intended entities, not multiplied join rows.
+
+**Interviewer follow-up: "Will `Slice` fix slow page 10,000?"** Not by itself. A `PageRequest`-based slice still uses an offset; deep offsets can remain expensive. Use stable ordering with a unique tie-breaker, bound page sizes, and consider keyset scrolling/cursors for sequential traversal. Concurrent inserts/deletes can still shift offset-based results; neither result type promises a frozen snapshot or an atomic match between count and content.
 
 ## 6. Persistence performance and correctness
 
@@ -334,6 +390,51 @@ public void changeNote(PurchaseOrder detached) {
 
 Here the supplied entity is detached and repository new-detection identifies it as existing. This is merge behavior, not a claim that every `save()` returns a different instance.
 
+**Follow-up: "What if I fetched the entity in this same transaction?"**
+
+```java
+@Transactional
+public void changeNote(Long orderId, String note) {
+    PurchaseOrder managed = orders.findById(orderId).orElseThrow();
+    managed.setNote(note);
+}
+```
+
+In the ordinary writable transaction shown here, the loaded entity is managed and dirty checking synchronizes the change at flush; no extra `save()` or `merge()` is required. After the persistence context ends, the object is no longer tracked by that context. Changing it later does not automatically update the database.
+
+**Follow-up: "What happens to database fields I did not populate in a detached object?"** Merge is state copying, **not partial-update intent**. If an ordinary loaded/copied attribute contains `null`, `0` or `false`, that value can replace the managed value and be written at flush. A database constraint may reject it instead, rolling back rather than silently accepting the overwrite.
+
+```text
+Database row:       id=42, note="Leave at reception", status="OPEN"
+Sparse input:       id=42, note="Call on arrival",    status=null
+After naive merge:  managed note="Call on arrival", managed status=null
+Flush:              status may be overwritten, or a NOT NULL constraint fails
+```
+
+An object newly constructed from a request with an ID is not necessarily a genuinely detached entity; entity-new detection and version mappings still matter. The risk remains: omitted request fields represented by defaults can be mistaken for state to persist. JPA requires unfetched lazy attributes to be ignored during merge; that is different from an ordinary field left `null` while constructing a sparse request object.
+
+**Safer application pattern: load, authorize, apply allowed changes.** Use a request DTO describing the operation rather than binding incoming JSON directly onto an entity. For a note-only endpoint, assume `NoteChange` has a `String note()` accessor, `null` deliberately clears the note, and the authorization component checks the current caller:
+
+```java
+@Transactional
+public void updateNote(Long orderId, NoteChange command) {
+    PurchaseOrder managed = orders.findById(orderId).orElseThrow();
+    orderAccess.requireCanEdit(managed);
+    managed.setNote(command.note());
+}
+```
+
+This operation changes only the note; it never maps request defaults onto status or other fields. Validate input and enforce business invariants before changing state. For a multi-field PATCH, represent **absent**, **present with null**, and **present with a value** separately when clearing is allowed. A blanket "copy only non-null fields" rule cannot distinguish omission from an intentional clear. Generic property copying also risks changing fields the caller must not control.
+
+| Proposed fix | What it actually guarantees |
+| --- | --- |
+| Load the managed entity, apply an allowlisted DTO | Preserves fields outside the operation; explicit presence semantics can support deliberate clears |
+| Hibernate `@DynamicUpdate` | Can restrict UPDATE columns to detected changes; it does not stop a merged `null` being detected as a change |
+| `@Column(updatable = false)` | Excludes that column from provider-generated updates for the mapping; it is not authorization or protection against native SQL/other writers, and the managed value can still differ from the database |
+| `@Version` | Detects conflicting versioned writes; it does not distinguish an omitted field from an intentional value |
+
+**Interviewer follow-up: "Does loading first solve stale client updates?"** Not by itself. `@Version` protects concurrent writes after the load, but an old client can still overwrite a value if the server loads the latest version and applies that stale request unconditionally. When the contract requires rejecting stale edits, carry and check an expected version/ETag as well as retaining database optimistic locking.
+
 ### 10.5 Flush succeeded. Can a later failure still undo the writes?
 
 **Answer:** yes. Flush synchronizes SQL inside the transaction; it does not complete the transaction. A later rollback can undo transactional writes, although sequence allocation and external effects are not necessarily reversible.
@@ -391,13 +492,34 @@ UNIQUE (merchant_id, checkout_reference);
 
 Assume both columns are required/non-null in the schema. Only a recognized violation of this constraint should enter the duplicate-checkout policy. Unrelated constraints remain different failures. Constraint-name extraction is provider-specific; do not assume `failure.getMessage().contains(...)` is a reliable classifier.
 
-### 10.8 Why does commit fail after I caught the inner exception?
+### 10.8 What happens if I catch a runtime exception inside a JPA transaction?
 
-**Answer:** an inner `REQUIRED` participant can mark the shared transaction rollback-only. Catching its exception in the outer method does not restore committability; the outer completion can raise `UnexpectedRollbackException`.
+**Answer:** catching changes Java control flow; it does not reset transaction state. Ask **which transactional proxy saw the exception** and **whether Spring, the provider or the database already made the transaction rollback-only**. Under ordinary proxy-based rollback rules:
 
-**Scenario:** an inner repository write fails, the service catches it and writes an audit row in the same transaction. Both participate in a doomed transaction. If an independent failure audit is required, use a deliberately separate transaction through another proxy after considering pool usage and failure policy; do not assume self-invoked `REQUIRES_NEW` works.
+| Where the failure occurs | What the catch does not tell you | Likely outcome |
+| --- | --- | --- |
+| Local business code throws and the same method catches it before any transactional interceptor sees it | No rollback decision has necessarily been made | Earlier valid writes can commit if the transaction remains healthy and completion succeeds |
+| A separate bean's inner `REQUIRED` method throws a runtime exception through its transaction proxy, then the outer method catches it | The inner proxy has already applied its rollback rule to the shared transaction | Outer completion rolls back and normally raises `UnexpectedRollbackException` |
+| A constraint/flush failure occurs in Hibernate or the database, then application code catches it | The transaction and persistence context may already be unusable; a transactional repository proxy can also mark rollback-only | Roll back; attempted completion may report `UnexpectedRollbackException` or another transaction/provider failure |
 
-**Sample: reproduce rollback-only without depending on a database error.** These methods belong to separate Spring beans:
+**Case 1: a caught local business exception can still allow commit.** Assume `ShippingOptionUnavailableException` is an application `RuntimeException`, and `shippingOptions.choose()` is a local helper with no transactional proxy or persistence access.
+
+```java
+@Transactional
+public void chooseShipping(Long orderId, String requestedOption) {
+    PurchaseOrder order = orders.findById(orderId).orElseThrow();
+    try {
+        order.setShippingOption(shippingOptions.choose(requestedOption));
+    } catch (ShippingOptionUnavailableException failure) {
+        log.info("Requested shipping unavailable; applying standard shipping");
+        order.setShippingOption("STANDARD");
+    }
+}
+```
+
+Here the catch implements a deliberate supported fallback. If no other failure occurs, dirty checking can persist `STANDARD` at completion. The outer transaction interceptor sees a normal return, not the caught exception. This is not a reason to catch arbitrary runtime exceptions: doing so can commit partial work that the caller expected to roll back.
+
+**Case 2: why does commit fail after I caught the inner exception?** These methods belong to separate Spring beans, so the call crosses the inner proxy:
 
 ```java
 // InnerWork
@@ -420,6 +542,33 @@ public void run() {
 ```
 
 Under the ordinary `REQUIRED`/rollback policy, the inner proxy marks the shared transaction rollback-only. The outer proxy then fails completion with `UnexpectedRollbackException`. This catch is intentionally an anti-pattern demonstration, not successful recovery.
+
+```text
+Caller -> outer proxy starts transaction T
+           -> outer method calls inner proxy; REQUIRED joins T
+                -> inner method throws IllegalStateException
+                <- inner proxy marks T rollback-only and rethrows
+           <- outer method catches it and returns normally
+        <- outer proxy tries to commit T, rolls back instead
+Caller receives UnexpectedRollbackException
+```
+
+**Follow-up: "What if I call `this.innerMethod()`?"** Ordinary self-invocation bypasses the inner transaction proxy. For a purely local exception caught by the outer method, the inner annotation alone therefore does not mark rollback-only. A real provider/database failure can still invalidate the transaction independently; bypassing the proxy is not a recovery strategy.
+
+**Case 3: a caught persistence failure is not repaired.** For example, `saveAndFlush()` encounters a unique-constraint violation; the service catches it and tries to write an audit row using the same transaction. Both writes now participate in a transaction that may already be doomed, and the audit is not independently durable. Find the **first** failure rather than treating the later `UnexpectedRollbackException` as the root cause. Section 7 explains why catching around `save()` may also miss a failure deferred until commit.
+
+Do not memorize "every JPA exception marks rollback-only." JPA distinguishes exceptions: for example, `QueryTimeoutException` describes a statement-only rollback that does not itself mark the transaction rollback-only. But if that unchecked exception crosses a participating Spring transaction interceptor, Spring's rollback rule can still mark the shared transaction. Database-specific behavior and timeout types matter; a generic statement that every timeout either permits continuation or dooms the transaction is unsafe.
+
+**Choose handling based on the business outcome:**
+
+| Intended outcome | Practical handling |
+| --- | --- |
+| All writes must fail together | Let the exception propagate, or rethrow a meaningful runtime exception with its cause. For a checked wrapper, configure the rollback rule explicitly. |
+| Handle the error inside the method but discard its writes | Explicitly call `TransactionAspectSupport.currentTransactionStatus().setRollbackOnly()` within the active Spring-managed transactional method. Return an explicit failure outcome, not a success response. |
+| Optional work must fail independently | Call a separate proxied bean using `@Transactional(propagation = Propagation.REQUIRES_NEW)` and catch its failure outside that inner boundary. It rolls back independently; it is not a nested/savepoint transaction. |
+| Persist a failure audit after the main write fails | Prefer catching outside the completed failed transaction, then invoke a separate transactional audit writer. If an outer transaction still exists, use a deliberately independent boundary and define what happens if auditing fails too. |
+
+**Important limits:** marking the owning scope rollback-only explicitly usually causes an intentional rollback without `UnexpectedRollbackException`; an enclosing scope unaware of a participating scope's rollback-only decision can still receive it. `noRollbackFor` changes Spring's exception-based policy, not a provider/database rollback-only marker. `REQUIRES_NEW` cannot repair the outer transaction, may need an additional connection, and can contend with locks held by the suspended transaction. Its committed data survives a later outer rollback, so reserve it for genuinely independent work.
 
 ### 10.9 How do you retry a deadlock or optimistic-lock conflict safely?
 
@@ -565,30 +714,52 @@ List<OrderIdView> findByStatus(String status);
 
 Spring Data supplies proxy instances implementing the interface; you do not implement it yourself. A closed projection like this exposes matching entity properties. Nested/open projections can have different loading costs: inspect SQL rather than assuming every projection fetches only a few columns or eliminates N+1.
 
-### 10.14 Can an HTTP failure undo a payment or model call?
+### 10.14 If a transactional method calls a payment API and then fails, does rollback undo the payment?
 
-**Answer:** no. A local JPA transaction controls its database resource, not a remote provider. Do not keep it open during a long call just to create an illusion of atomicity.
+**Answer:** no. A local JPA transaction controls its database resource; an ordinary HTTP call to a payment provider does not enlist that provider in the transaction. Rolling back database changes does not reverse an external charge.
 
-**Scenario:** persist intent, invoke a provider using a stable operation reference, then persist outcome in a separate boundary. Coordinate committed events with an outbox where required and reconcile uncertain remote outcomes. REST advice describes the failure; it is not compensation.
-
-**Example workflow:**
+**Scenario:** a checkout service saves an order, successfully charges the customer, then throws a runtime exception before the database transaction commits.
 
 ```text
-Transaction 1: save payment intent + outbox work; commit.
-Worker: call provider with the intent's stable idempotency reference.
-Transaction 2: record confirmed outcome + next outbox event; commit.
-Timeout: query/reconcile provider outcome before treating it as failure.
+Caller -> transaction proxy starts database transaction
+           -> save order (not committed yet)
+           -> payment API charges customer successfully
+           -> later business logic throws RuntimeException
+        <- proxy rolls back database transaction
+
+Result: order changes are rolled back; the customer remains charged.
 ```
 
-A crash between the provider's success and transaction 2 requires reconciliation or a safe repeat against the same provider reference. It is not repaired by putting the entire worker under one local JPA transaction.
+Calling `saveAndFlush()` before charging does not solve this: flush is not commit. Keeping the database transaction open throughout the HTTP call also does not create cross-system atomicity; it can hold connections and locks while waiting on the provider.
 
-### 10.15 How do you prove flush/commit and concurrent-failure behavior?
+**Follow-up: "Can I undo the charge?"** If the business outcome requires it, request a void/refund through a separate provider operation. That is **compensation**, not database rollback. Compensation can also fail or time out, so record its status and provide retry/reconciliation. Returning an HTTP error through REST advice does not perform compensation.
 
-**Answer:** use the production database engine and real transaction boundaries. A rollback-by-default test can pass without ever exercising commit. Mocks cannot prove constraints, Hibernate SQL or database locking.
+**Follow-up: "What if the payment API times out instead?"** The outcome is unknown, not necessarily failed. The provider may have charged the customer before its response was lost. Record an unresolved state and check the provider's status using the payment reference. Where supported, retry with the **same idempotency key** under the provider's documented contract; a new key can create a second charge.
 
-**Scenario:** a duplicate-checkout test runs through the service proxy with no enclosing test transaction, observes failure, then verifies committed state in a new transaction. A concurrent version test uses separate transactions/persistence contexts and coordinated execution. Run the actual migrations; assert the intended category/invariant rather than vendor error-message text.
+**One practical design: durable intent and asynchronous processing.**
 
-**Sample test skeleton:** `writer.create()` is the transactional method from section 7. Use a configured production-engine test database and actual migrations.
+```text
+Transaction 1: save pending order/payment intent + outbox work; commit.
+Worker: call provider using the intent's stable idempotency reference.
+Transaction 2: record confirmed outcome + any next outbox event; commit.
+Timeout: keep outcome unresolved; query/reconcile provider status.
+```
+
+The outbox makes the intent and work item durable together; it does not make the external charge and local outcome update atomic or guarantee exactly-once delivery. A crash after provider success but before transaction 2 still requires reconciliation or an idempotent repeat. Define pending, confirmed, failed and compensation states according to the business contract rather than treating every exception as "nothing happened."
+
+### 10.15 How do you integration-test database commits, rollbacks and concurrent updates?
+
+**Answer:** run a **database integration test** against a real, running test database, not a mocked repository. The example below exercises the transactional service, Spring Data repository, Hibernate and database together. Mocks cannot verify actual SQL, database constraints or locking.
+
+Use the **same database technology as production, not the production database itself**. For example, if production uses PostgreSQL, start an isolated PostgreSQL instance with Testcontainers and apply the application's actual migrations. "Database integration test" is clearer than "live test," which can imply testing a deployed environment.
+
+**Why does the transaction boundary matter?** A test-level `@Transactional` normally starts a transaction that rolls back after the test. A service using `REQUIRED` can join that transaction instead of committing when its method returns. A test may therefore pass without reaching the commit that would fail in normal application use. An explicit flush can expose some failures, but it does not prove commit succeeded.
+
+For this commit-focused test, omit test-level `@Transactional`: call the service through its Spring proxy so each call completes its own transaction before control returns to the test.
+
+**Scenario:** create an order successfully, attempt another with the same unique checkout reference, then verify that the original remains and no duplicate was committed. Assert the intended exception category and stored result, not vendor error-message wording.
+
+**Sample test skeleton:** `writer.create()` is the transactional method from section 7. Configure the test datasource separately to use the isolated database described above; `@SpringBootTest` alone does not provision it.
 
 ```java
 @SpringBootTest
@@ -615,7 +786,9 @@ class OrderCommitTests {
 }
 ```
 
-There is deliberately no test-level `@Transactional`; each writer call completes its transaction. The fixture helper creates a unique valid command, and the repository declares the shown count query. This test assumes the selected stack translates this named uniqueness violation into that Spring category; establish that against the actual provider/database. Use isolated fixtures/cleanup. Do not claim this sequential test proves concurrent duplicate handling.
+The fixture helper creates a unique valid command, and the repository declares the shown count query. Verification reads the database after the writer's transaction has completed, rather than inspecting entities left in its persistence context. This test assumes the selected stack translates this uniqueness violation into the shown Spring category; establish that against the actual provider/database. Because there is no enclosing test rollback, explicitly clean up committed fixtures or discard the isolated database.
+
+**Follow-up: "Does this also test concurrency?"** No; these calls are sequential. To test optimistic locking, use separate transactions and persistence contexts, coordinate both workers to load the same entity version before either updates it, then verify that one update succeeds and the other reports a conflict. Concurrent duplicate creation is another separate test. A sequential constraint test does not prove either behavior.
 
 ### 10.16 Where should technical translation end and domain meaning begin?
 
@@ -636,6 +809,14 @@ Unknown integrity failure
 ```
 
 Reuse section 7's `OrderErrors` handler for the HTTP sample. The classification step belongs before that handler; the handler must not guess business meaning by inspecting arbitrary SQL error strings.
+
+### 10.17 Should a search endpoint return `Page` or `Slice`?
+
+**Answer:** start with the client contract. Return `Page` when the screen genuinely needs total results/pages; return `Slice` when content plus "more available" is sufficient. Both accept `Pageable`; neither replaces query tuning.
+
+**Scenario:** an order-management screen shows "247 open orders, page 1 of 25," so a count has product value. A mobile order-history feed only offers "Load more," so paying for a total on every request may be unnecessary. Use section 5's repository examples and look-ahead SQL to explain the difference.
+
+**Follow-up: "How do you prove the improvement?"** Inspect the generated data/count SQL and their query plans with realistic filters and data volumes. Confirm the slice returns at most the requested size and that `hasNext()` is correct for `size - 1`, `size` and `size + 1` matching rows. Use a simple query with no lazy-association accesses when measuring pagination query counts, since unrelated loading can add SQL. Also measure a deep page: removing the count does not remove offset cost.
 
 **Interview recall:** identify the transaction owner, the SQL/flush/commit stage, the translated failure category, the remaining state, and whether retry is safe. Then explain the HTTP contract. Those mechanisms matter more than memorizing Hibernate exception names.
 
@@ -664,7 +845,11 @@ Not all of these are new behavior: propagation, rollback-only and EntityManager 
 - [Spring transaction management](https://docs.spring.io/spring-framework/reference/data-access/transaction.html)
 - [Propagation](https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html)
 - [JPA repository transactions](https://docs.spring.io/spring-data/jpa/reference/jpa/transactions.html)
+- [Paging, sorting and result types](https://docs.spring.io/spring-data/commons/reference/repositories/query-methods-details.html#repositories.special-parameters)
+- [JPA statement-only query timeout contract](https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/QueryTimeoutException.html)
 - [Entity persistence and new detection](https://docs.spring.io/spring-data/jpa/reference/jpa/entity-persistence.html)
+- [EntityManager lifecycle and operations](https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/EntityManager.html)
+- [Hibernate 6.6: merging a detached entity whose row was deleted](https://docs.hibernate.org/orm/6.6/migration-guide/#merge-versioned-deleted)
 - [Spring Data JPA reference](https://docs.spring.io/spring-data/jpa/reference/index.html)
 - [Spring JDBC](https://docs.spring.io/spring-framework/reference/data-access/jdbc.html)
 - [Framework 7.0 release notes](https://github.com/spring-projects/spring-framework/wiki/Spring-Framework-7.0-Release-Notes)

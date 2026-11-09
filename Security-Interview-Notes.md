@@ -63,6 +63,12 @@ With multiple pods, choose shared session storage or a deliberate routing/sessio
 | "The session cookie works for GET, but creating an order returns 403. What do you inspect?" | Check whether the POST supplied the expected CSRF proof, then whether the user has create permission. A valid session proves identity, not request intent or permission; fix the missing integration instead of disabling the checks. |
 | "An administrator disables a user with three active sessions. Is clearing one browser cookie enough?" | No; the other sessions still exist. Invalidate relevant server sessions or enforce current account status on use. Also define idle timeout (time without activity) and absolute lifetime (maximum age even with activity). |
 
+**Application-issued JWT variant:** application-owned password login can issue a JWT instead of creating a server session. This is a token-login variant, not Pattern A's session flow as defined above, and does not by itself imply OAuth/OIDC. Prefer asymmetric signing so only the issuer holds signing authority and APIs validate using public keys.
+
+**Azure Key Vault for signing:** storing a private key as a **Secret** lets the app retrieve it and sign locally, but exposes the key in application memory. A **Key Vault Key** lets an authorized issuer request signatures without retrieving the private key; use managed/workload identity and least-privilege signing access. APIs can validate locally using trusted public keys/JWKS, without calling the vault for every request. Remote signing adds latency, availability and service-limit considerations; use bounded retries and never fall back to a hardcoded key.
+
+Pin signing to a key version, map it to the JWT's `kid`, and coordinate rotation with validators: publish the new public key before using it, then retain the old public key until legitimate old tokens expire. A compromised key requires emergency removal of trust, including cached verifier keys, rather than normal overlap. Key Vault does not prevent an already compromised issuer from abusing its signing permission. Clearing a browser token is not server-side revocation, and cookie-carried JWT authentication still needs appropriate CSRF protection.
+
 [Spring implementation: section 8.2](Spring-Security-Interview-Notes.md#82-pattern-a-application-owned-login-and-server-session).
 
 ## 3. Pattern B: external OIDC login with a backend session
