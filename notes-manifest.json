@@ -7,6 +7,16 @@
       "bytes": 118306
     },
     {
+      "path": "Java-Core-Interview-Notes.md",
+      "title": "Core Java: Practical Interview Notes through Java 21",
+      "bytes": 142514
+    },
+    {
+      "path": "Java-Exceptions-Generics-IO-Serialization.md",
+      "title": "Java: Exceptions, Generics, I/O, Serialization and Garbage Collection",
+      "bytes": 62927
+    },
+    {
       "path": "Spring-Boot-Interview-Notes.md",
       "title": "Spring Boot: Interview Notes",
       "bytes": 59477
