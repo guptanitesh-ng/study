@@ -690,7 +690,19 @@ G1 divides the heap into regions rather than using only fixed contiguous young/o
 3. **Mixed collections:** after marking, G1 may collect young regions and selected old regions together, choosing regions with useful reclaimable space.
 4. **Fallback pressure:** if evacuation cannot find sufficient destination space, the JVM may need a costly Full GC or fail to recover enough memory.
 
+```mermaid
+flowchart LR
+    Y[Young collection\nSTW evacuation] --> O{Old-region occupancy\npast IHOP threshold?}
+    O -->|No| Y
+    O -->|Yes| M[Concurrent marking\napp keeps running]
+    M --> X[Mixed collection\nyoung + selected old regions]
+    X -->|Enough space reclaimed| Y
+    X -->|Evacuation can't find\ndestination space| F[Fallback: Full GC\nor allocation failure]
+```
+
 This is a conceptual lifecycle, not a promise that every log contains the same sequence or that "minor" and "major" classify every event consistently. In G1, an object larger than half a region is treated as **humongous** and allocated directly in humongous regions. Large transient payloads can consume region capacity and increase reclamation pressure; investigate allocation size and lifetime before assuming a collector defect.
+
+**If GC logs show evacuation failure specifically** (not just a long pause), the usual levers—in order of how directly they address the mechanism—are: start concurrent marking earlier with `-XX:InitiatingHeapOccupancyPercent` (default 45; lowering it, e.g. to 30–35, gives G1 more lead time before old-gen occupancy forces a scramble), reserve more headroom for evacuation with `-XX:G1ReservePercent` (default 10; raising it, e.g. to 15–20, keeps destination space available even when the heap is nearly full), and reconsider `-XX:G1HeapRegionSize` (16–32 MB) if humongous allocations are fragmenting regions. These are measured responses to an observed failure, not defaults to pre-tune—verify with GC logs before and after any change.
 
 ### Diagnose the symptom before tuning a flag
 
@@ -703,12 +715,48 @@ Start with a service objective and a baseline: request p95/p99 latency, throughp
 | p99 spikes align with long STW pauses | Pause cost or insufficient headroom | Correlate unified GC logs and safepoints with request latency. Check live set, heap sizing, evacuation pressure and CPU contention; evaluate a different collector only against the same SLO/load. |
 | Frequent collections with little memory reclaimed | High live set relative to heap, or allocation pressure | Measure post-GC occupancy and allocation rate. Increasing `-Xmx` may buy time only if the container has safe headroom and live data is legitimate. |
 | G1 has humongous allocation or evacuation warnings | Large objects or insufficient evacuation space | Inspect object sizes, payload buffering and concurrent peaks; stream large bodies and leave region/heap headroom. |
-| Container kills the process although heap is below `-Xmx` | Native/process memory exceeds the limit | Compare RSS/container metrics with heap, direct buffers, thread count/stacks, Metaspace and native libraries; `-Xmx` is not a process-wide memory cap. |
 | Memory rises after redeploy/reload or plugin refresh | Class-loader retention | Check loaded class counts and whether application threads, static registries, logging, drivers or thread locals still reference the old loader. |
+
+(Native/process memory exceeding `-Xmx` despite a stable Java heap is a distinct failure mode, covered in the broader symptom table under "Choosing the right diagnostic tool" below, alongside deadlocks, thread leaks and JIT warm-up.)
 
 **Retention is a graph question.** A heap dump can show which object dominates retained memory, but it does not by itself prove why the object is still needed. Find the path from a root to the retained object, then trace that owner back to the lifecycle that should have removed it.
 
 **GC overhead is not always the root cause.** A saturated service may allocate more because queues and retries grow under downstream latency. GC then reports the symptom—more objects and pressure—while the cause is overload, unbounded buffering or a slow dependency. Check request rate, queue depth, retries and dependency latency alongside GC data.
+
+### A ThreadLocal leak, traced end to end
+
+`ThreadLocal` retention is a specific, recurring version of the "retention is a graph question" problem above, and worth knowing as a concrete reference chain: each pooled thread holds a `ThreadLocalMap`; an entry's value references its class; the class references its `ClassLoader`. If that value is a request-scoped object loaded by the **application's** class loader (common in app servers and most container platforms doing hot redeploy or per-webapp isolation), the chain becomes `pooled Thread → ThreadLocalMap → value → Class → ClassLoader`. Because the thread is pooled and long-lived, the whole class loader—and every class and static field it loaded—cannot be unloaded, even though the request that created the value finished long ago. This is why ThreadLocal leaks show up as **Metaspace growth or a rising class count**, not just heap growth, and why they are easy to miss: heap occupancy can look stable while retained class metadata climbs.
+
+```
+GC root
+  │
+  ▼
+pooled Thread  ──────────────┐  (lives for the pool's lifetime,
+  │                          │   survives past any single request)
+  ▼                          │
+ThreadLocalMap               │
+  │                          │
+  ▼                          │
+Entry.value (request object) │
+  │                          │
+  ▼                          │
+value.getClass()             │
+  │                          │
+  ▼                          │
+ClassLoader  ◄────────────────┘  (entire app class loader pinned:
+  │                                every class + static field it
+  ▼                                loaded is now unreclaimable)
+Metaspace / class-metadata growth
+```
+
+**A STAR-format version of this incident, worth having ready for an interview:**
+
+- **Situation:** A service handling roughly 15,000 requests/minute was being OOMKilled by Kubernetes every 36–48 hours, always on the same deployment, with heap usage looking unremarkable in dashboards right before the kill.
+- **Task:** Find the retention source before the next scheduled restart masked it again, without adding broad heap headroom as a stopgap.
+- **Action:** Captured a heap dump just before a scheduled restart and opened it in Eclipse MAT. Ran the **Dominator Tree** view and grouped the result by class loader (MAT's "group by class loader" option) rather than by class—this surfaced that one class loader instance retained an outsized share of the heap. Tracing its dominating path led to a `ThreadLocal<UserContext>` set by an authentication filter and never removed on the response path, holding a reference back to the deployment's own class loader through pooled worker threads.
+- **Result:** Added `ThreadLocal.remove()` in a `finally` block on the request-completion path; pod restarts stopped recurring on the 36–48 hour cadence. Followed up with a SonarQube rule to flag `ThreadLocal.set()` calls without a matching `remove()` in the same method, to catch the pattern before it reached production again.
+
+A related, often-missed symptom: because the leaked class loader also pins thread-local-held locks and synchronization structures, a cascading hot-redeploy can show **thread-pool exhaustion or STW pause growth** as a secondary effect—worth checking class-loader retention even when the primary complaint is about threads or pauses, not just memory.
 
 ### A practical evidence-first workflow
 
@@ -742,7 +790,7 @@ In AKS, teams typically combine layers rather than expect one tool to explain ev
 
 This separation matters: container CPU/memory and Kubernetes events do not show object-retention paths; a heap dump does not explain a slow downstream dependency; traces alone may not identify GC pause time. Correlate timestamps, pod/replica identity, deployment version and request latency across the layers.
 
-**A practical incident sequence:** start with pod restarts, OOM events, CPU/memory usage and application SLO dashboards; compare affected replicas with healthy ones; use traces and logs to narrow the endpoint/dependency; then collect JVM evidence if the pattern points to GC, allocation, thread contention or heap retention. If `jcmd` is available and permitted, a bounded JFR recording can be started and written to a volume or temporary path, then copied out for offline analysis:
+**A practical incident sequence** — this is the same evidence-first workflow above, applied to Kubernetes: steps 1–2 (confirm the failure mode, establish a baseline) map to the cluster/pod and APM layers below, before steps 3–6 (GC logs, JFR, classify, change one variable) bring in JVM evidence. Start with pod restarts, OOM events, CPU/memory usage and application SLO dashboards; compare affected replicas with healthy ones; use traces and logs to narrow the endpoint/dependency; then collect JVM evidence if the pattern points to GC, allocation, thread contention or heap retention. If `jcmd` is available and permitted, a bounded JFR recording can be started and written to a volume or temporary path, then copied out for offline analysis:
 
 ```shell
 kubectl exec -n <namespace> <pod> -- jcmd 1 JFR.start name=incident settings=default duration=120s filename=/tmp/incident.jfr
@@ -751,7 +799,56 @@ kubectl cp <namespace>/<pod>:/tmp/incident.jfr .\incident.jfr
 
 Wait for the 120-second recording to finish before copying the file. The PID `1` example applies only when the JVM is PID 1 in that container; verify the target PID and command support in the actual image. A temporary file disappears with the container and may fill ephemeral storage, so plan where it is written and how it is retrieved. Recordings and especially heap dumps can contain sensitive application data; restrict access, retention and transfer, and assess collection overhead. Heap histograms/dumps can be high-impact operations—use them deliberately, not as routine probes. If pods are immutable or omit diagnostic tools, plan the approach in advance: for example, bounded startup JFR with controlled file export, or an approved diagnostic image/process-access design. An ephemeral Kubernetes debug container does not automatically have access to another container's JVM attach socket or filesystem.
 
+**This on-demand recording is really "Tier 2"—a deeper, longer dive once a pattern is already suspected.** Many teams also run a low-overhead "Tier 1" recording continuously, as a standing baseline, by starting it at JVM launch rather than only reacting to an incident:
+
+```shell
+java -XX:StartFlightRecording=disk=true,dumponexit=true,dumponexitpath=/var/log/jfr/,maxsize=100m,maxage=1h -jar service.jar
+```
+
+`disk=true` with a bounded `maxsize`/`maxage` keeps a rolling window of recent activity on local disk at roughly 1–2% CPU overhead; `dumponexit=true,dumponexitpath=...` means that if the pod crashes or is OOMKilled, the recording leading up to the crash is flushed to disk before exit—mountable as a volume or pulled from a sidecar—instead of being lost with the container. This converts "the incident already happened and I have no data" into "the evidence from right before the kill is already on disk." Tier 2 (an explicit, longer, higher-detail `jcmd JFR.start` or an async-profiler attach) is then reserved for confirming a specific hypothesis the Tier 1 baseline raised.
+
 Do not expose JMX or remote debugging ports publicly just to make diagnosis easier. Prefer approved, authenticated and network-restricted operational paths, and follow the cluster's least-privilege and incident-data handling policies.
+
+### Choosing the right diagnostic tool
+
+Heap dumps, thread dumps, JFR and flame graphs are not interchangeable, and the once-common reflex of "reach for a heap dump" is really a special case of a broader question: is the symptom about **memory or CPU/time**, and do you need a **snapshot of one moment** or **behavior across a window**? A snapshot tool shows the aftermath; a time-series tool shows the mechanism that produced it.
+
+| | Snapshot (one moment) | Time-series (a window) |
+| --- | --- | --- |
+| Memory | Heap dump — exact retained objects and the reference graph holding them | JFR allocation / old-object-sample events — what is allocating, and what survives GC over time |
+| CPU / time | Thread dump — what every thread is doing right now | Flame graph (async-profiler or JFR CPU samples) — where CPU time accumulated over a window |
+
+```mermaid
+flowchart TD
+    A[Symptom] --> B{100% CPU sustained?}
+    B -->|Yes| C[Flame graph: async-profiler or JFR CPU samples]
+    A --> D{Heap growing / OOM?}
+    D -->|Confirmed leak over time| E[JFR allocation + old-object-sample events]
+    D -->|Need exact retained refs now| F[Heap dump: jcmd GC.heap_dump]
+    A --> G{High latency, low CPU?}
+    G -->|Yes| H[Thread dump x3-5, 10s apart, or JFR thread states]
+    A --> I{Long / frequent GC pauses?}
+    I -->|Yes| J[JFR GC events + -Xlog:safepoint]
+    A --> K{App hangs, CPU idle?}
+    K -->|Yes| L[Thread dump: look for BLOCKED/deadlock cycles]
+    A --> M{Native/off-heap memory grows, Java heap stable?}
+    M -->|Yes| N[Native Memory Tracking: jcmd VM.native_memory]
+```
+
+A heap dump answers "what's alive and what's pinning it," which only explains a **confirmed, already-identified** leak. It costs a real stop-the-world pause, produces a large file, and may contain sensitive data — use it to confirm a specific hypothesis, not as the first probe. JFR/flame graphs are low-overhead enough to run continuously, so by the time an incident fires you often already have the causal evidence (allocation site, hot stack frames, GC trend) rather than only a snapshot of the aftermath.
+
+**A caveat worth knowing before trusting a CPU flame graph:** JFR's CPU-time sampling is traditionally **safepoint-biased**—older JFR builds can only take a stack sample when a thread reaches a JVM safepoint, so code paths that don't hit safepoints often (tight loops without allocation or method calls, some JIT-compiled hot loops) can be under-represented, making the flame graph look "thinner" there than the true CPU cost. async-profiler instead uses OS-level signals (`perf_events` on Linux, or `AsyncGetCallTrace`) to sample at arbitrary points, including inside safepoint-free loops, giving an unbiased profile at the cost of being a separate agent to attach rather than a built-in JFR event. Newer JDKs have reduced JFR's safepoint bias, but when a flame graph and a manual code-reading hunch disagree about where time is going, this is the first thing to check before trusting either.
+
+**The fuller symptom reference, beyond GC/heap tuning:** the table in "Diagnose the symptom before tuning a flag" above covers allocation, retention, pause cost and class-loader symptoms you tune GC flags against. The table below covers everything else production incidents commonly surface—deadlocks, native memory, thread leaks, JIT warm-up and non-GC pauses—so between the two you have one comprehensive symptom → cause → tool reference instead of re-deriving it per incident.
+
+| Symptom | Likely cause | First tool |
+| --- | --- | --- |
+| Application appears hung, CPU is idle or low | Deadlock or indefinite lock wait | Thread dump (`jcmd Thread.print` flags cycles automatically) |
+| Off-heap/native/RSS memory grows while Java heap stays flat, or container kills the process although heap is below `-Xmx` | Direct buffer leak, native library leak, or Metaspace growth; `-Xmx` is not a process-wide memory cap | Native Memory Tracking (`-XX:NativeMemoryTracking=summary`, `jcmd VM.native_memory diff`) |
+| Thread count keeps climbing under load | Thread leak or unbounded pool (e.g. unbounded `ExecutorService`) | JFR thread-lifecycle events; check pool configuration and Micrometer thread metrics |
+| High latency right after deploy/restart, then settles | JIT warm-up, not a defect | JFR compiler/inlining events; consider AppCDS if warm-up itself is the problem |
+| CPU is high but the flame graph is dominated by GC threads | The collector itself can't keep up with allocation/live-set pressure | Revisit GC tuning and allocation rate, not application code |
+| A pause has no matching GC log entry | Non-GC safepoint operation (deoptimization, class redefinition, etc.) | `-Xlog:safepoint` to see the actual reason, not just "GC" |
 
 ### Tuning principles and common traps
 
