@@ -1,11 +1,5 @@
 # Java: Exceptions, Generics, I/O, Serialization and Garbage Collection
 
-This companion guide gathers topics from the larger Core Java notes and expands generics using the user-provided `Generics.pdf`. It also develops the Core guide's JVM/GC introduction into a practical guide to collector evolution and performance diagnosis. The PDF's useful concepts are restated in a Java 21 context; misleading shortcuts are corrected rather than copied as rules.
-
-**Reading path:** start with the exception hierarchy and contracts, then use generics to understand type-safe APIs, follow bytes through I/O wrappers, treat serialization as a legacy compatibility and trust-boundary topic, and finish with garbage collection and evidence-based performance diagnosis. The Java Core guide remains the home for language foundations and the version timeline.
-
-Examples target Java 21 unless a historical version boundary is stated. Some examples are fragments to place in a class; imports are included where useful. Do not treat native Java deserialization as a new protocol recommendation.
-
 ## Contents
 
 1. Exceptions: contracts, propagation and cleanup
@@ -80,52 +74,6 @@ There is no rule that "business errors must be checked" or "unexpected errors mu
 | Is the condition an ordinary outcome or a violated precondition? | It may be an expected operational outcome that callers can respond to, such as a user's uploaded file failing format validation. | It often indicates invalid arguments, broken invariants or a programming error, such as passing a negative page size or violating a method's valid-format precondition. |
 | Will adding this exception burden downstream APIs? | The obligation is worth making explicit and is stable enough for callers to handle. | It would spread `throws` declarations through many layers, especially when those layers cannot recover. |
 
-These are design heuristics, not a severity scale. A database outage can be important but unchecked can still be appropriate if a caller cannot recover locally; a checked exception is not automatically handled safely just because the compiler forces a catch.
-
-**Import-format example:** if a method's contract requires a well-formed document and a caller passes malformed data, treating that as an invalid argument with `IllegalArgumentException` can be appropriate. If the operation is specifically validating a user's uploaded file, invalid format is an expected validation outcome; return structured validation details or use an exception only when the caller can meaningfully report, correct or reject that upload. The word "format" alone does not determine checked versus unchecked.
-
-```java
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-
-class ImportService {
-    // The caller can choose another path, prompt for a file, or report
-    // an import-specific failure. The checked contract makes handling explicit.
-    static String readImport(Path path) throws IOException {
-        return Files.readString(path);
-    }
-
-    // A negative limit is a caller programming error, not an operational
-    // condition that a caller should retry by catching an exception.
-    static void validateLimit(int limit) {
-        if (limit < 0) {
-            throw new IllegalArgumentException("limit must not be negative");
-        }
-    }
-}
-```
-
-Translate an exception only when the new layer can add useful meaning; preserve the cause:
-
-```java
-class ImportFailure extends Exception {
-    ImportFailure(String message, Throwable cause) {
-        super(message, cause);
-    }
-}
-
-static String readRequiredImport(Path path) throws ImportFailure {
-    try {
-        return Files.readString(path);
-    } catch (IOException e) {
-        throw new ImportFailure("Could not read the required import", e);
-    }
-}
-```
-
-Here the service boundary translates a low-level I/O failure into an import-specific checked contract. If it added no context or policy, allowing `IOException` to propagate could be clearer. Do not catch an exception merely to rethrow the same object, wrap every exception in `RuntimeException`, or return an empty/success-shaped result that hides failure.
-
 **Interview answer:** "I choose based on whether callers can take meaningful action and whether the API should enforce that handling at compile time. Checked exceptions suit recoverable conditions that the caller is expected to address or propagate; unchecked exceptions suit violated preconditions and failures callers cannot usefully handle at that layer. I preserve causes when translating, and I don't swallow failures just to satisfy either choice."
 
 ### What if the operation and close both fail?
@@ -188,31 +136,46 @@ If finally itself returns, its return can replace the pending return. If it thro
 **Interview follow-up:** "Should a service catch `Exception` and return an empty list?" Only if that empty result truly means the documented degraded outcome and the failure is surfaced appropriately. A database outage is not normally indistinguishable from "no records". Retry only appropriate transient failures with bounded attempts, deadlines and idempotency awareness.
 
 ## 2. Generics: type-safe APIs and the limits of erasure
-
-
 ### Version journey
 
 Java 5 introduced generics. Java 7 added diamond inference (`new ArrayList<>()`); Java 8 improved target-type inference. Java 9 allowed diamond with anonymous classes subject to restrictions. Through Java 21, ordinary generics still use reference types: `List<int>` is not supported.
 
-`List<Integer>` is **not** a subtype of `List<Number>`. Otherwise code accepting a number list could insert a `Double` into an integer list. Arrays are covariant instead and enforce their component type at runtime; generics prevent many of those mistakes at compilation.
-
-### Producer extends, consumer super
-
 ```java
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
-class GenericTransfer {
-    static <T> void copy(List<? extends T> source, List<? super T> target) {
-        for (T value : source) {
-            target.add(value);
-        }
+class DiamondEvolution {
+    // Java 7: diamond infers T from the declared/assigned type.
+    List<String> namesJava7 = new ArrayList<>();
+
+    // Java 8: target-type inference extends diamond into method-call and
+    // generic-method argument positions, not just local-variable declarations.
+    static void printAll(List<String> values) {
+        values.forEach(System.out::println);
     }
+
+    void demoJava8() {
+        printAll(new ArrayList<>());          // T inferred as String from printAll's parameter type
+        List<String> sorted = sortedCopy(new ArrayList<>(List.of("b", "a")));
+    }
+
+    static <T extends Comparable<T>> List<T> sortedCopy(List<T> source) {
+        List<T> copy = new ArrayList<>(source);
+        copy.sort(Comparator.naturalOrder());
+        return copy;
+    }
+
+    // Java 9: diamond with an anonymous class is allowed, as long as the
+    // inferred type does not depend on members only the anonymous body adds.
+    Comparator<String> byLength = new Comparator<>() {   // compiles on Java 9+
+        @Override
+        public int compare(String a, String b) {
+            return Integer.compare(a.length(), b.length());
+        }
+    };
 }
 ```
-
-An integer source can feed a number/object target. `? extends Number` lets you read values as `Number`, but does not let you add arbitrary numbers because the actual list might be an integer list. `? super Integer` lets you add integers, but reading is only safely typed as `Object`. An unknown wildcard does not mean "any type can be inserted".
-
-**Interview follow-up:** "Is `List<? extends Number>` immutable?" No. Wildcards restrict what this reference can express; operations such as clearing/removing may still be possible, and another reference may mutate the list. It is not an unmodifiable wrapper.
 
 ### Erasure explains real compiler restrictions
 
@@ -225,6 +188,59 @@ Most generic type arguments are erased at runtime, although declarations can ret
 | `new T()` | The erased type parameter does not provide a usable constructor; pass a factory |
 | `new List<String>[10]` | Generic array creation cannot enforce that parameterized element type |
 | Convert a raw list to a typed list with an unchecked cast | It can defer a `ClassCastException` until a later read |
+
+Each row above is a real compiler/runtime behavior, not a rule of thumb — here is each one demonstrated:
+
+```java
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Supplier;
+
+class ErasureRestrictions {
+
+    // 1) Overload clash: both signatures erase to handle(List).
+    // static void handle(List<String> values) {}
+    // static void handle(List<Integer> values) {}   // compile error: erasure of method is the same
+
+    // 2) instanceof cannot check an erased type argument.
+    static void checkKind(Object obj) {
+        // if (obj instanceof List<String>) {}        // compile error: illegal generic type for instanceof
+        if (obj instanceof List<?> list) {             // allowed: pattern variable is List<?>
+            for (Object element : list) {
+                if (!(element instanceof String)) {
+                    throw new ClassCastException("expected String elements");
+                }
+            }
+        }
+    }
+
+    // 3) new T() has no constructor to call at runtime; a factory replaces it.
+    static final class Factory<T> {
+        // T create() { return new T(); }             // compile error: cannot instantiate type variable
+        T create(Supplier<T> constructorRef) {
+            return constructorRef.get();               // caller supplies String::new, etc.
+        }
+    }
+
+    // usage: new Factory<String>().create(String::new);
+
+    // 4) Generic array creation is rejected; an unchecked raw-array cast is the escape hatch.
+    @SuppressWarnings("unchecked")
+    static List<String>[] boxes() {
+        // return new List<String>[10];                // compile error: generic array creation
+        return new List[10];                            // compiles only with the unchecked warning
+    }
+
+    // 5) An unchecked cast defers the failure to the first unsafe read, not the cast itself.
+    static void deferredFailure() {
+        List raw = new ArrayList();
+        raw.add(42);
+        @SuppressWarnings("unchecked")
+        List<String> unsafe = raw;                      // compiles with an unchecked-cast warning here
+        String value = unsafe.get(0);                   // throws ClassCastException here instead
+    }
+}
+```
 
 Raw types exist for migration compatibility, not as the default for new APIs. Keep unchecked operations narrowly isolated and justified; `@SuppressWarnings` does not make the data safe. Generic varargs can also create heap pollution; use `@SafeVarargs` only after verifying that the implementation really is safe.
 
@@ -539,6 +555,43 @@ Default serialization includes applicable non-static, non-transient instance fie
 
 `Externalizable` is a different contract: the public no-arg constructor runs and the implementation explicitly reads/writes its external form. Enum deserialization restores the named constant. Serializable records use their canonical constructor during deserialization; do not apply the ordinary-class constructor-bypass rule indiscriminately to records.
 
+```java
+import java.io.Externalizable;
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+
+final class Money implements Externalizable {
+    private long cents;   // populated by readExternal, not by this field initializer
+    private String currency;
+
+    // Required by the contract: the runtime calls this constructor first,
+    // then calls readExternal to populate the fields. Omitting it fails at
+    // runtime with InvalidClassException, not at compile time.
+    public Money() {
+    }
+
+    Money(long cents, String currency) {
+        this.cents = cents;
+        this.currency = currency;
+    }
+
+    @Override
+    public void writeExternal(ObjectOutput out) throws IOException {
+        out.writeLong(cents);          // explicit, ordered writes the class fully controls
+        out.writeUTF(currency);
+    }
+
+    @Override
+    public void readExternal(ObjectInput in) throws IOException {
+        cents = in.readLong();         // must read in the exact order writeExternal wrote
+        currency = in.readUTF();
+    }
+}
+```
+
+The difference from ordinary `Serializable` is concrete: with `Serializable`, the serializable class's own constructor is bypassed and default serialization reflects over the fields for you. With `Externalizable`, `Money()` genuinely runs on deserialization — so any constructor-side validation or invariants there execute again — and there is no default field-by-field encoding at all; `writeExternal`/`readExternal` are the *entire* wire format. That gives full control over layout and versioning, but also means a mismatched read/write order silently misreads subsequent fields instead of failing fast, and forgetting the public no-arg constructor is a runtime surprise rather than a compiler error.
+
 ### Foundation: the graph, transient fields and custom hooks
 
 If a serialized object references two other objects, default serialization follows their applicable fields too. If two fields point to the same object, deserializing that graph preserves their shared-reference relationship; it does not independently clone every occurrence. Cycles are supported. A default-included non-serializable object causes failure rather than automatically becoming serializable.
@@ -606,6 +659,35 @@ If a superclass is not serializable, its accessible no-arg constructor initializ
 ### The modern recommendation is not "deserialize everything with a filter"
 
 Java 9 introduced deserialization filtering (JEP 290), and Java 17 added context-specific filter factories (JEP 415). Filters can restrict classes and resource metrics such as depth, references and array lengths. They reduce risk but do not validate all business invariants or make arbitrary object graphs trustworthy.
+
+```java
+import java.io.ObjectInputFilter;
+import java.io.ObjectInputStream;
+import java.io.IOException;
+
+// JEP 290: a pattern-based filter installed on one stream.
+ObjectInputStream ois = new ObjectInputStream(inputStream);
+ois.setObjectInputFilter(ObjectInputFilter.Config.createFilter(
+        "com.example.model.*;maxdepth=5;maxarray=1000;!*"));
+// Allow only com.example.model.* classes, cap graph depth/array size,
+// and reject ("!*") everything else -- including java.util/java.lang
+// classes not explicitly allowed, which a real allowlist must add back.
+Object restored = ois.readObject();
+```
+
+```java
+import java.io.ObjectInputFilter;
+
+// JEP 415: a JVM-wide filter *factory*, set once via
+// jdk.serialFilterFactory or ObjectInputFilter.Config.setSerialFilterFactory,
+// so every ObjectInputStream in the process is filtered even if the
+// call site never sets a filter itself -- useful for libraries/frameworks
+// that deserialize on your behalf without exposing the stream to you.
+ObjectInputFilter.Config.setSerialFilterFactory((current, next) ->
+        next == null ? current : ObjectInputFilter.merge(current, next));
+```
+
+A filter rejecting an unexpected class stops a known attack shape (instantiating a gadget-chain class), but it does not check that an allowed `Order` object has a non-negative `amount` or a `userId` the caller is actually entitled to -- that validation still belongs to the application, after deserialization succeeds.
 
 **Practical choice:** avoid native Java deserialization for untrusted network input or as a new cross-service protocol. Prefer explicit schemas and validated DTOs with controlled polymorphism. JSON is not automatically safe either: size limits, allowed types and validation still matter.
 
@@ -716,8 +798,12 @@ Start with a service objective and a baseline: request p95/p99 latency, throughp
 | Frequent collections with little memory reclaimed | High live set relative to heap, or allocation pressure | Measure post-GC occupancy and allocation rate. Increasing `-Xmx` may buy time only if the container has safe headroom and live data is legitimate. |
 | G1 has humongous allocation or evacuation warnings | Large objects or insufficient evacuation space | Inspect object sizes, payload buffering and concurrent peaks; stream large bodies and leave region/heap headroom. |
 | Memory rises after redeploy/reload or plugin refresh | Class-loader retention | Check loaded class counts and whether application threads, static registries, logging, drivers or thread locals still reference the old loader. |
-
-(Native/process memory exceeding `-Xmx` despite a stable Java heap is a distinct failure mode, covered in the broader symptom table under "Choosing the right diagnostic tool" below, alongside deadlocks, thread leaks and JIT warm-up.)
+| Application appears hung, CPU is idle or low | Deadlock or indefinite lock wait | Thread dump (`jcmd Thread.print` flags cycles automatically) |
+| Off-heap/native/RSS memory grows while Java heap stays flat, or container kills the process although heap is below `-Xmx` | Direct buffer leak, native library leak, or Metaspace growth; `-Xmx` is not a process-wide memory cap | Native Memory Tracking (`-XX:NativeMemoryTracking=summary`, `jcmd VM.native_memory diff`) |
+| Thread count keeps climbing under load | Thread leak or unbounded pool (e.g. unbounded `ExecutorService`) | JFR thread-lifecycle events; check pool configuration and Micrometer thread metrics |
+| High latency right after deploy/restart, then settles | JIT warm-up, not a defect | JFR compiler/inlining events; consider AppCDS if warm-up itself is the problem |
+| CPU is high but the flame graph is dominated by GC threads | The collector itself can't keep up with allocation/live-set pressure | Revisit GC tuning and allocation rate, not application code |
+| A pause has no matching GC log entry | Non-GC safepoint operation (deoptimization, class redefinition, etc.) | `-Xlog:safepoint` to see the actual reason, not just "GC" |
 
 **Retention is a graph question.** A heap dump can show which object dominates retained memory, but it does not by itself prove why the object is still needed. Find the path from a root to the retained object, then trace that owner back to the lifecycle that should have removed it.
 
@@ -790,7 +876,7 @@ In AKS, teams typically combine layers rather than expect one tool to explain ev
 
 This separation matters: container CPU/memory and Kubernetes events do not show object-retention paths; a heap dump does not explain a slow downstream dependency; traces alone may not identify GC pause time. Correlate timestamps, pod/replica identity, deployment version and request latency across the layers.
 
-**A practical incident sequence** — this is the same evidence-first workflow above, applied to Kubernetes: steps 1–2 (confirm the failure mode, establish a baseline) map to the cluster/pod and APM layers below, before steps 3–6 (GC logs, JFR, classify, change one variable) bring in JVM evidence. Start with pod restarts, OOM events, CPU/memory usage and application SLO dashboards; compare affected replicas with healthy ones; use traces and logs to narrow the endpoint/dependency; then collect JVM evidence if the pattern points to GC, allocation, thread contention or heap retention. If `jcmd` is available and permitted, a bounded JFR recording can be started and written to a volume or temporary path, then copied out for offline analysis:
+**Applying the evidence-first workflow above to Kubernetes:** steps 1–2 (confirm the failure mode, establish a baseline) map to the cluster/pod and APM layers in the table above; steps 3–6 (GC logs, JFR, classify, change one variable) then bring in JVM evidence once the layer table points at the JVM. If `jcmd` is available and permitted, a bounded JFR recording can be started and written to a volume or temporary path, then copied out for offline analysis:
 
 ```shell
 kubectl exec -n <namespace> <pod> -- jcmd 1 JFR.start name=incident settings=default duration=120s filename=/tmp/incident.jfr
@@ -839,16 +925,7 @@ A heap dump answers "what's alive and what's pinning it," which only explains a 
 
 **A caveat worth knowing before trusting a CPU flame graph:** JFR's CPU-time sampling is traditionally **safepoint-biased**—older JFR builds can only take a stack sample when a thread reaches a JVM safepoint, so code paths that don't hit safepoints often (tight loops without allocation or method calls, some JIT-compiled hot loops) can be under-represented, making the flame graph look "thinner" there than the true CPU cost. async-profiler instead uses OS-level signals (`perf_events` on Linux, or `AsyncGetCallTrace`) to sample at arbitrary points, including inside safepoint-free loops, giving an unbiased profile at the cost of being a separate agent to attach rather than a built-in JFR event. Newer JDKs have reduced JFR's safepoint bias, but when a flame graph and a manual code-reading hunch disagree about where time is going, this is the first thing to check before trusting either.
 
-**The fuller symptom reference, beyond GC/heap tuning:** the table in "Diagnose the symptom before tuning a flag" above covers allocation, retention, pause cost and class-loader symptoms you tune GC flags against. The table below covers everything else production incidents commonly surface—deadlocks, native memory, thread leaks, JIT warm-up and non-GC pauses—so between the two you have one comprehensive symptom → cause → tool reference instead of re-deriving it per incident.
-
-| Symptom | Likely cause | First tool |
-| --- | --- | --- |
-| Application appears hung, CPU is idle or low | Deadlock or indefinite lock wait | Thread dump (`jcmd Thread.print` flags cycles automatically) |
-| Off-heap/native/RSS memory grows while Java heap stays flat, or container kills the process although heap is below `-Xmx` | Direct buffer leak, native library leak, or Metaspace growth; `-Xmx` is not a process-wide memory cap | Native Memory Tracking (`-XX:NativeMemoryTracking=summary`, `jcmd VM.native_memory diff`) |
-| Thread count keeps climbing under load | Thread leak or unbounded pool (e.g. unbounded `ExecutorService`) | JFR thread-lifecycle events; check pool configuration and Micrometer thread metrics |
-| High latency right after deploy/restart, then settles | JIT warm-up, not a defect | JFR compiler/inlining events; consider AppCDS if warm-up itself is the problem |
-| CPU is high but the flame graph is dominated by GC threads | The collector itself can't keep up with allocation/live-set pressure | Revisit GC tuning and allocation rate, not application code |
-| A pause has no matching GC log entry | Non-GC safepoint operation (deoptimization, class redefinition, etc.) | `-Xlog:safepoint` to see the actual reason, not just "GC" |
+**The full symptom → cause → tool reference—allocation, retention, pause cost, class-loader retention, deadlocks, native memory, thread leaks, JIT warm-up and non-GC pauses—lives in the single table under "Diagnose the symptom before tuning a flag" above**, so there is one place to check instead of two.
 
 ### Tuning principles and common traps
 

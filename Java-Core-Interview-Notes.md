@@ -715,9 +715,7 @@ The result is `"express-object"`. The compiler selects `send(Object)` because `m
 9. If a method can't be inherited (because it’s private), you cannot override it. Remember that overriding implies that you're reimplementing a method you inherited!
 10. Using super to invoke an overridden method only applies to instance methods.
 11. A subclass uses super.overriddenMethodName() to call the superclass version of an overridden method.
-An override must have an appropriate matching signature; it cannot reduce access or broaden checked exceptions. It can return a more-specific reference type and can declare fewer/narrower checked exceptions. Unchecked exceptions are not restricted by that checked-exception rule, though violating the behavioral contract remains a design bug.
-
-`private` methods are not overridden; static methods are **hidden**; final methods cannot be overridden. A `super.method()` call deliberately selects superclass behavior instead of ordinary virtual selection of that override. Use `@Override` so a mistaken parameter change is caught as a compilation error.
+12. Use `@Override` so a mistaken parameter change is caught as a compilation error.
 
 **Substitutability scenario:** a subtype accepts fewer valid inputs or throws `UnsupportedOperationException` for a core operation that its parent promises. Compilation alone does not make that inheritance relationship sound. Reconsider the contract or use composition.
 
