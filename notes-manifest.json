@@ -9,12 +9,17 @@
     {
       "path": "Java-Core-Interview-Notes.md",
       "title": "Core Java: Practical Interview Notes through Java 21",
-      "bytes": 142514
+      "bytes": 136322
+    },
+    {
+      "path": "Java-8-Lambdas-Streams-Optional.md",
+      "title": "Java 8: Lambdas, Streams, Optional and Date/Time",
+      "bytes": 19867
     },
     {
       "path": "Java-Exceptions-Generics-IO-Serialization.md",
       "title": "Java: Exceptions, Generics, I/O, Serialization and Garbage Collection",
-      "bytes": 66298
+      "bytes": 75354
     },
     {
       "path": "Spring-Boot-Interview-Notes.md",

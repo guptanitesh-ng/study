@@ -1,6 +1,6 @@
 # Core Java: Practical Interview Notes through Java 21
 
-**Companion guide:** [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md) contains the detailed material moved from sections 9, 13, 15 and 16, plus an expanded generics guide incorporating the supplied PDF. Those section numbers remain as pointers here. Collections and multithreading are still deferred to their own guides.
+**Companion guides:** [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md) contains the detailed material moved from sections 9, 13, 15 and 16, plus an expanded generics guide incorporating the supplied PDF. [Java 8: Lambdas, Streams, Optional and Date/Time](Java-8-Lambdas-Streams-Optional.md) contains the detailed material moved from section 14 and the Java 8 date/time subsection of section 11, consolidated with a second supplied PDF. Those section numbers remain as pointers here. Collections and multithreading are still deferred to their own guides.
 
 ## 1. Interfaces: from contracts to shared behavior
 
@@ -1387,17 +1387,9 @@ The result is `59.97`. `new BigDecimal(0.1)` captures the binary floating-point 
 
 **Interview follow-up:** "Should I always use HALF_UP?" No. The currency, jurisdiction and business rule determine scale and rounding. `BigDecimal` is immutable but does not encode those policies for you.
 
-### Java 8 date/time: model the actual meaning
+### Java 8 date/time
 
-| Requirement | Suitable type | Trap to avoid |
-| --- | --- | --- |
-| An event on the global timeline | `Instant` | Using the server's local wall-clock time as a global timestamp |
-| A calendar date, such as a birthday | `LocalDate` | Adding a meaningless UTC midnight and shifting dates across zones |
-| A local appointment plus regional rules | `ZonedDateTime` or explicit local time and `ZoneId` policy | Daylight-saving gaps/overlaps can need explicit resolution |
-| A timestamp with a fixed offset | `OffsetDateTime` | An offset is not a region's full future DST rule set |
-| Time-based versus date-based amount | `Duration` versus `Period` | A calendar day across a DST change need not be exactly 24 elapsed hours |
-
-`java.time` and `DateTimeFormatter` arrived in Java 8 and are designed around immutable types. Legacy `SimpleDateFormat` is mutable and not thread-safe. Prefer injecting a `Clock` into time-dependent code so tests do not depend on the real wall clock.
+This subtopic has moved to the companion guide: [Java 8: Lambdas, Streams, Optional and Date/Time](Java-8-Lambdas-Streams-Optional.md#9-the-java-8-date-and-time-api). Use that guide for the full type-selection table and the `Period`/`Duration`/`ChronoUnit`/`TemporalAdjuster` examples.
 
 ## 12. Arrays and control flow: from statements to patterns
 
@@ -1497,88 +1489,7 @@ This topic has moved to the companion guide: [Exceptions, Generics, I/O and Seri
 
 ## 14. Lambdas, streams and Optional
 
-### Foundation: a lambda supplies one interface operation
-
-Start with the anonymous-class relationship from section 7. A functional interface has one abstract method after the relevant inheritance/Object-method rules are applied; default/static methods do not add abstract operations. `@FunctionalInterface` asks the compiler to enforce that shape. The interface supplies a target signature; a lambda supplies that operation's implementation:
-
-```java
-@FunctionalInterface
-interface TextRule {
-    boolean accepts(String text);
-}
-
-class LambdaRecall {
-    static void show() {
-        TextRule anonymous = new TextRule() {
-            @Override
-            public boolean accepts(String text) {
-                return text.length() >= 3;
-            }
-        };
-        TextRule lambda = text -> text.length() >= 3;
-        TextRule methodReference = LambdaRecall::longEnough;
-        System.out.println(anonymous.accepts("java")); // true
-        System.out.println(lambda.accepts("java")); // true
-        System.out.println(methodReference.accepts("java")); // true
-    }
-
-    static boolean longEnough(String text) {
-        return text.length() >= 3;
-    }
-}
-```
-
-The compiler knows that `text` is String and the expression must return boolean because of `TextRule.accepts`. `text -> expression` uses an implicit return; `(text) -> { return expression; }` is the block form. `LambdaRecall::longEnough` refers to compatible behavior; it does not call the method when the reference is created.
-
-An anonymous class creates its own `this`; a lambda uses the enclosing `this`. Captured locals must remain final/effectively final. A lambda cannot implement an arbitrary multi-operation interface or replace a superclass constructor/state model. These basics do not require learning stream pipelines or generics first.
-
-### Java 8 introduced a processing style, not automatic parallelism
-
-**Deferred reading through the end of "Pipeline reasoning for interviews":** the existing stream material below belongs with the separate collections study. Resume the current reading path at "Optional models absence, not every failure."
-
-A method reference such as `String::strip` can supply behavior when the target signature fits, just as the standalone lambda example above does.
-
-Captured locals must be final/effectively final. Mutating a captured list is possible, but does not become safe merely because reassignment of the variable is forbidden.
-
-```java
-import java.util.List;
-
-class NamePipeline {
-    static List<String> normalize(List<String> names) {
-        return names.stream()
-                .filter(name -> name != null)
-                .map(String::strip)
-                .filter(name -> !name.isEmpty())
-                .distinct()
-                .toList();
-    }
-}
-```
-
-This accepts null elements intentionally, strips names, drops blanks, retains distinct values in encounter order and returns an unmodifiable list. `strip` requires Java 11 and `Stream.toList` Java 16. In Java 8, use suitable trimming and collectors instead; `Collectors.toList()` itself promises no specific implementation or mutability.
-
-### Pipeline reasoning for interviews
-
-| Operation/concept | Meaning | Common mistake |
-| --- | --- | --- |
-| `map` | One result per input | Returning streams and accidentally producing a stream of streams |
-| `flatMap` | Flatten zero/many results per input | Losing track of ownership/closing of I/O-backed sources |
-| Lazy intermediate operations | Work is driven by a terminal operation | Expecting a pipeline declaration to execute side effects |
-| Short-circuiting | Operations such as `findFirst`/`anyMatch` can stop early | Expecting every element's callback to run |
-| Single use | A stream cannot be consumed twice | Caching a stream instead of a reusable collection or supplier |
-| Reduction | Combine values using appropriate associative operations | Using subtraction or shared mutable state in parallel reduction |
-
-Do not use `peek` or other pipeline side effects for mandatory auditing: execution can be skipped or optimized, and short-circuiting changes which elements are processed. Use explicit reliable workflow steps for required side effects.
-
-**Parallel stream scenario:** a shared `ArrayList` is mutated in `parallelStream().forEach`. This is a data race, not a faster collector. Prefer appropriate collectors/reduction, and measure. Common-pool contention, blocking I/O, ordering and task overhead can make parallel streams slower or interfere with unrelated work.
-
-### Optional models absence, not every failure
-
-Java 8 introduced `Optional` as a useful return type for an absent result. It should not itself be null. It does not explain why a network call failed or replace a proper error model.
-
-`orElse(expensiveFallback())` evaluates its argument eagerly even when a value exists. `orElseGet(() -> expensiveFallback())` supplies the fallback lazily. Prefer `map`, `flatMap`, `ifPresent` or an explicit absence decision to unchecked `get()`. Primitive optional types avoid some boxing.
-
-**Interview follow-up:** "Should every entity field or parameter be Optional?" No. Match the surrounding API/framework and serialization contracts; a return-value pattern is not automatically a good persistence-field design. Collections usually represent "no items" with an empty collection rather than `Optional<List<T>>`.
+This topic has moved to the companion guide: [Java 8: Lambdas, Streams, Optional and Date/Time](Java-8-Lambdas-Streams-Optional.md). Use that guide for the full explanations and examples, including method references, checked exceptions in lambdas, the three `reduce()` flavors and parallel-stream guidance.
 
 ## 15. I/O, NIO.2, charsets and network boundaries
 
