@@ -9,12 +9,22 @@
     {
       "path": "Java-Core-Interview-Notes.md",
       "title": "Core Java: Practical Interview Notes through Java 21",
-      "bytes": 136322
+      "bytes": 110213
     },
     {
       "path": "Java-8-Lambdas-Streams-Optional.md",
       "title": "Java 8: Lambdas, Streams, Optional and Date/Time",
-      "bytes": 19867
+      "bytes": 22166
+    },
+    {
+      "path": "Java-Multithreading-Concurrency.md",
+      "title": "Java Multithreading and Concurrency",
+      "bytes": 63701
+    },
+    {
+      "path": "Java-Collections-DataStructures.md",
+      "title": "Java Collections and Data Structures",
+      "bytes": 29120
     },
     {
       "path": "Java-Exceptions-Generics-IO-Serialization.md",

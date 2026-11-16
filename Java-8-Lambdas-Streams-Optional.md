@@ -71,6 +71,25 @@ An anonymous class creates its own `this`; a lambda uses the enclosing `this`. C
 | `UnaryOperator<T>` | `T apply(T t)` | `Function<T, T>` specialization |
 | `BinaryOperator<T>` | `T apply(T t1, T t2)` | `BiFunction<T, T, T>` specialization, used by `reduce` |
 
+### Beyond standalone use: composition and pipeline glue
+
+Writing one inline lambda and processing it is the common case in real code. The less-visible role these interfaces play is as **composable units** and as the **typed plumbing between pipeline stages**:
+
+- **Default-method composition.** `Predicate` offers `and`/`or`/`negate`; `Function`/`UnaryOperator` offer `andThen`/`compose`; `Comparator` offers `thenComparing`/`reversed`. Building small named predicates once and combining them is closer to a reusable specification than a throwaway lambda:
+
+  ```java
+  Predicate<Order> isHighValue = o -> o.getAmount() > 10_000;
+  Predicate<Order> isInternational = o -> !o.getCountry().equals("IN");
+  Predicate<Order> needsReview = isHighValue.and(isInternational).or(Order::isFlagged);
+
+  orders.stream().filter(needsReview).forEach(reviewQueue::add);
+  ```
+
+- **Streams stages are typed slots for these interfaces, not special syntax.** `map` takes a `Function`, `filter` a `Predicate`, `forEach` a `Consumer`, `reduce` a `BinaryOperator`, `sorted` a `Comparator`, `flatMap` a `Function<T, Stream<R>>`. `Collectors.groupingBy(classifier, downstream)` goes one level further: `classifier` is a `Function`, and `downstream` is itself a `Collector` — which is internally assembled from a `Supplier`, a `BiConsumer`, a `BinaryOperator`, and optionally a `Function` (see `Collector.of`). Collectors are functional interfaces composed into a reusable mutable-reduction recipe, which is the closest Streams gets to treating them as infrastructure rather than inline code.
+- **`Optional` chains the same combinators as Streams**, just at cardinality 0/1: `map`/`filter`/`orElseGet` use `Function`/`Predicate`/`Supplier` identically to their Stream counterparts (see section 8).
+- **`CompletableFuture` repurposes them as async continuations** rather than data transforms: `thenApply(Function)`, `thenAccept(Consumer)`, `thenCompose(Function<T, CompletableFuture<R>>)`, `exceptionally(Function<Throwable, T>)`.
+- **Method references pay off most once you compose**, since a composed pipeline reads as a sequence of named operations rather than nested lambda bodies: `Function<String, Integer> parseAndDouble = ((Function<String, Integer>) Integer::parseInt).andThen(x -> x * 2);`.
+
 ## 3. Checked exceptions inside lambdas
 
 None of the standard functional interfaces (`Function`, `Consumer`, `Supplier`, `Runnable`, and so on) declare a checked exception on their abstract method. A lambda body implementing one of them therefore cannot let a checked exception escape undeclared — the compiler rejects it the same way it would reject an overriding method widening a `throws` clause.

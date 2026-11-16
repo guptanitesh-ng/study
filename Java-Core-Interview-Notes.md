@@ -1,6 +1,19 @@
 # Core Java: Practical Interview Notes through Java 21
 
-**Companion guides:** [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md) contains the detailed material moved from sections 9, 13, 15 and 16, plus an expanded generics guide incorporating the supplied PDF. [Java 8: Lambdas, Streams, Optional and Date/Time](Java-8-Lambdas-Streams-Optional.md) contains the detailed material moved from section 14 and the Java 8 date/time subsection of section 11, consolidated with a second supplied PDF. Those section numbers remain as pointers here. Collections and multithreading are still deferred to their own guides.
+**Companion guides:** [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md) contains the detailed material moved from sections 9, 13, 15 and 16, plus an expanded generics guide incorporating the supplied PDF. [Java 8: Lambdas, Streams, Optional and Date/Time](Java-8-Lambdas-Streams-Optional.md) contains the detailed material moved from section 14 and the Java 8 date/time subsection of section 11, consolidated with a second supplied PDF. [Java Multithreading and Concurrency](Java-Multithreading-Concurrency.md) contains the detailed material moved from sections 19 and 20, consolidated with three supplied PDFs. [Java Collections and Data Structures](Java-Collections-DataStructures.md) contains the detailed material moved from section 10, consolidated with a fourth supplied PDF. The original section numbers for all moved material are preserved below rather than scattered as pointers through the rest of this document.
+
+## Moved to companion guides
+
+These eight sections now live entirely in the companion guides above. Original numbering is preserved for cross-reference; the remaining sections in this document keep their original numbers unchanged.
+
+- **9. Generics: type-safe APIs and the limits of erasure** — [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md)
+- **10. Collections: choose semantics before implementation** — [Java Collections and Data Structures](Java-Collections-DataStructures.md)
+- **13. Exceptions and resource cleanup** — [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md)
+- **14. Lambdas, streams and Optional** — [Java 8: Lambdas, Streams, Optional and Date/Time](Java-8-Lambdas-Streams-Optional.md)
+- **15. I/O, NIO.2, charsets and network boundaries** — [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md)
+- **16. Serialization: legacy mechanism, explicit trust boundary** — [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md)
+- **19. Threads, synchronization and the Java Memory Model** — [Java Multithreading and Concurrency](Java-Multithreading-Concurrency.md)
+- **20. Executors, futures and Java 21 virtual threads** — [Java Multithreading and Concurrency](Java-Multithreading-Concurrency.md)
 
 ## 1. Interfaces: from contracts to shared behavior
 
@@ -1214,65 +1227,6 @@ The result is `"ready"` because these record instances have equal components and
 
 **Interview follow-up:** "What if `compareTo` returns zero for unequal objects?" Sorted sets/maps use comparison to identify equivalent keys, so one may replace or exclude the other. Keep ordering consistent with equality unless the API explicitly documents the difference. `BigDecimal("1.0")` and `BigDecimal("1.00")` are the classic case: numerically equal by `compareTo`, not equal by `equals`.
 
-## 9. Generics: type-safe APIs and the limits of erasure
-
-This topic has moved to the companion guide: [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md). Use that guide for the full explanations and examples.
-
-## 10. Collections: choose semantics before implementation
-
-**Deferred:** retained material; revise and study in the dedicated collections document, not this pass.
-
-### Historical baseline and additions
-
-The collections framework predates Java 5; Java 5 added generics, enhanced-for iteration and important concurrent utilities. Java 8 added stream integration and map convenience operations. Java 9 introduced `List.of`, `Set.of`, `Map.of`; Java 10 added `copyOf`; Java 21 added sequenced collection interfaces.
-
-| Need | Starting point | Trade-off or failure mode |
-| --- | --- | --- |
-| Ordered items, indexed reads | `ArrayList` | Amortized constant-time append; middle insert/delete shifts elements |
-| Unique values, no required encounter order | `HashSet` | Expected efficient membership; depends on correct equality/hashing |
-| Key lookup, no required encounter order | `HashMap` | Expected constant-time basic operations with well-distributed hashes; not thread-safe |
-| Stable insertion/access order | `LinkedHashMap`, `LinkedHashSet` | Extra linkage overhead; access-order maps are useful for cache policies |
-| Sorted keys/range operations | `TreeMap`, `TreeSet` | Logarithmic basic operations; comparator determines key equivalence |
-| Stack/queue/deque | `ArrayDeque` | No null elements; generally preferable to legacy `Stack` |
-| Priority processing | `PriorityQueue` | Head follows priority; iteration is not sorted |
-| Coordinated producer/consumer work | A bounded `BlockingQueue` | Capacity supplies backpressure; decide what happens when full |
-| Concurrent key lookup/update | `ConcurrentHashMap` | No null keys/values; multi-key business operations are not automatically atomic |
-
-`LinkedList` can unlink a node efficiently once positioned, but finding an index is linear, with allocation/locality overhead. "Lots of inserts means linked list" is not a sufficient performance argument.
-
-### Fixed-size, unmodifiable and immutable are different
-
-`Arrays.asList(array)` returns a fixed-size list backed by that array: `set` works and affects the backing array, but structural `add/remove` do not. `Collections.unmodifiableList(source)` is a read-only **view**, so source changes remain visible.
-
-`List.of` and `List.copyOf` are unmodifiable; neither makes mutable elements immutable. These factories reject null elements. `Set.of` rejects duplicates; `Map.of` rejects duplicate keys and null keys/values. Do not assume their iteration order is insertion order. Use an appropriate ordered implementation when order is part of the output contract.
-
-### Java 21 sequenced collections: a useful API change
-
-`SequencedCollection`, `SequencedSet` and `SequencedMap` represent encounter order. Lists, linked ordered sets/maps and sorted collections fit into the relevant interfaces; plain hash collections do not acquire a meaningful order.
-
-```java
-import java.util.ArrayList;
-import java.util.List;
-
-class SequencedExample {
-    static List<String> queueOrder() {
-        var queue = new ArrayList<>(List.of("first", "second"));
-        queue.reversed().addFirst("third");
-        return List.copyOf(queue);
-    }
-}
-```
-
-The result is `["first", "second", "third"]`: adding at the front of the reversed **view** adds at the end of the original. `reversed()` is not a detached copy. Endpoint mutation is optional; sorted collections cannot accept arbitrary explicit positioning that would violate sorting, and unmodifiable lists still reject mutation. `getFirst/getLast` throw on an empty list.
-
-### Iteration and concurrent updates
-
-Ordinary fail-fast iterators may throw `ConcurrentModificationException` for unsupported structural changes, including changes by the **same thread**. This is best-effort bug detection, not a concurrency guarantee. Use an iterator's supported removal, `removeIf`, or build a new collection.
-
-`ConcurrentHashMap` iterators are weakly consistent, not frozen snapshots. `CopyOnWriteArrayList` offers snapshot-style iteration and expensive writes; it fits rare-write/frequent-read workloads, not a high-volume write queue.
-
-**Interview follow-up:** "Can I do `if (!map.containsKey(k)) map.put(k, v)` safely on a concurrent map?" Individual calls may be thread-safe, but that sequence is not atomic. Use `putIfAbsent`, `compute` or another operation matching the requirement. Keep compute callbacks short and free of recursive updates; do not assume arbitrary remote side effects become exactly-once.
-
 ## 11. Strings, formatting, precise numbers and dates
 
 ### Strings: immutable values, not identity tokens
@@ -1483,22 +1437,6 @@ Switch expressions must be exhaustive. For closed enum/sealed alternatives, omit
 
 **Interview follow-up:** "Would you replace every `if` with a pattern switch?" No. Use it when alternatives form a clear classification; keep simple predicates simple, and avoid hiding expensive or state-changing work in guards.
 
-## 13. Exceptions and resource cleanup
-
-This topic has moved to the companion guide: [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md). Use that guide for the full explanations and examples.
-
-## 14. Lambdas, streams and Optional
-
-This topic has moved to the companion guide: [Java 8: Lambdas, Streams, Optional and Date/Time](Java-8-Lambdas-Streams-Optional.md). Use that guide for the full explanations and examples, including method references, checked exceptions in lambdas, the three `reduce()` flavors and parallel-stream guidance.
-
-## 15. I/O, NIO.2, charsets and network boundaries
-
-This topic has moved to the companion guide: [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md). Use that guide for the full explanations and examples.
-
-## 16. Serialization: legacy mechanism, explicit trust boundary
-
-This topic has moved to the companion guide: [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md). Use that guide for the full explanations and examples.
-
 ## 17. Annotations, reflection and runtime processing
 
 ### Metadata does not execute itself
@@ -1598,297 +1536,6 @@ Suppose a service processes each uploaded record by writing it, then calls a rem
 
 For an interview, explain which operations must commit together, how the framework binds its transaction to database work, and what happens if the process fails after the database commits but before the client receives confirmation. Driver categories, JDBC-ODBC history, scrollable cursors and disconnected `RowSet` variants are useful only when a specific legacy system or role calls for them; they are not core modern-application revision topics.
 
-## 19. Threads, synchronization and the Java Memory Model
-
-**Deferred:** retained material; revise and study in the dedicated multithreading document, not this pass.
-
-### Foundation: the task, Thread object and executing thread are distinct
-
-A `Runnable` describes work. A `Thread` object represents a thread's lifecycle. `new Thread(task)` creates that object; `start()` arranges separate execution of the task. Until start it is NEW and not alive. After its run method ends normally or exceptionally, it terminates and cannot be restarted.
-
-```java
-class StartingThreads {
-    static void show() throws InterruptedException {
-        Runnable task = () ->
-                System.out.println(Thread.currentThread().getName());
-
-        Thread worker = new Thread(task, "worker");
-        worker.run(); // Ordinary call: runs on this calling thread.
-        worker.start(); // Separate execution: prints worker.
-        worker.join(); // This calling thread waits for worker's termination.
-        System.out.println(worker.isAlive()); // false
-    }
-}
-```
-
-The first printed name is the caller's, commonly `main`; the second is `worker`. Join makes the final observation occur after termination. A second `start()` on the same object throws even after join: create a new Thread for another execution. Do not call both run/start as a normal launch pattern; they are contrasted here to expose the difference.
-
-Extending Thread and overriding public `run()` is also legal. Implementing Runnable normally separates work from the execution mechanism and leaves the task class free to extend another class. Several Thread objects can share one Runnable, so its fields can be shared state. Each execution has its own call stack, but that does not give it a private copy of referenced objects.
-
-Platform threads are typically scheduled by the OS; the old claim that the JVM schedules them independently of the OS is too broad. Virtual threads introduce an additional runtime scheduling layer, covered after these fundamentals in section 20.
-
-### Start with the problem: atomicity, visibility and ordering differ
-
-The Java Memory Model was revised in Java 5. The resulting happens-before rules still underpin Java 21; virtual threads do not replace them.
-
-| Requirement | Example failure | Suitable mechanism |
-| --- | --- | --- |
-| Visibility | Worker does not observe an updated stop flag reliably | A volatile flag, lock or higher-level coordination with the required memory effects |
-| Atomicity | Two increments overwrite one another | Atomic update or one lock covering the entire read-modify-write |
-| Multi-field invariant | Balance and reservation state disagree | One coherent locking/transactional protocol, not independent volatile fields |
-| Ordering/publication | Consumer observes a reference without guaranteed initialized state | Safe publication through locks, volatile, concurrent structures or other specified happens-before edges |
-
-### Volatile: more than a "main-memory copy", less than a lock
-
-The source's claim that volatile is instance-only is incorrect: **static volatile fields are legal too**. A volatile write happens-before subsequent reads of that field under the memory model; this provides visibility/ordering guarantees. It is not best understood as forcing every access to fetch from physical RAM.
-
-`volatile int count; count++;` is not an atomic increment. A volatile reference makes reference updates visible, not all subsequent unsynchronized mutations of the object thread-safe. Non-volatile `long`/`double` reads/writes may be non-atomic under the specification; do not rely on a particular 64-bit implementation to provide a stronger portable contract.
-
-```java
-import java.util.concurrent.atomic.AtomicInteger;
-
-class SharedState {
-    private volatile boolean stopping;
-    private final AtomicInteger completed = new AtomicInteger();
-
-    void requestStop() {
-        stopping = true;
-    }
-
-    boolean isStopping() {
-        return stopping;
-    }
-
-    void recordCompletion() {
-        completed.incrementAndGet();
-    }
-
-    int completedCount() {
-        return completed.get();
-    }
-}
-```
-
-This makes each operation meaningful independently; it does not promise that stopping and the count form one atomic snapshot. `LongAdder` (Java 8) can improve highly contended statistical counters, but its sum is not an atomic snapshot suitable for every balance/limit decision.
-
-### Synchronized protects a lock protocol, not an entire object automatically
-
-An instance synchronized method locks `this`; a static synchronized method locks that class's `Class` object. They are different locks. A synchronized block locks its specified object. Two synchronized methods using the same lock exclude each other; unsynchronized code does not become protected merely because some methods synchronize.
-
-Monitor locks are reentrant: a thread can reacquire a lock it already holds. Unlocking a monitor happens-before a subsequent lock of that same monitor. Every read/write participating in the protected invariant must obey the same protocol.
-
-**Scenario:** all writes synchronize, but an unsynchronized getter still returns stale state. The missing read-side synchronization/visibility is the defect. Adding `synchronized` to an unrelated method or locking a different object does not repair it.
-
-Proper construction and final-field rules support immutable objects, but do not publish `this` before construction completes. For mutable objects, use a clear safe-publication mechanism, such as a volatile reference or concurrent collection, and a protocol for later mutations.
-
-**Lock-object recall:** `synchronized (lock)` coordinates only with other code acquiring that **same object**. Two different account instances do not exclude each other through their separate synchronized instance methods. Static synchronized methods share the Class object's monitor instead. A lock is released when the protected block exits, including by exception; calling sleep inside it does not release it.
-
-### Thread lifecycle: API states versus scheduling diagrams
-
-Calling `run()` directly is an ordinary call on the current thread. `start()` schedules a new thread that will execute `run()`. A thread can be started only once; repeated start throws `IllegalThreadStateException`. Multiple threads can run the same `Runnable`, which means its mutable state may be shared.
-
-Java's `Thread.State` values are `NEW`, `RUNNABLE`, `BLOCKED`, `WAITING`, `TIMED_WAITING`, `TERMINATED`. There is no separate API enum state called `RUNNING`: RUNNABLE covers runnable/executing states. `BLOCKED` specifically concerns waiting to acquire a monitor; not every blocked I/O or lock operation appears as that state.
-
-Thread priorities, start order, `sleep` and `yield` do not establish fairness or reliable execution order. The source's claim that sleep guarantees turn-taking was **never a valid guarantee**.
-
-| Operation | Effect | Lock/interruption detail |
-| --- | --- | --- |
-| `Thread.sleep(...)` | Pause the current thread, subject to scheduling/timer behavior | Does not release held monitors; can throw `InterruptedException` |
-| `Thread.yield()` | Scheduler hint | May be ignored; not a coordination primitive |
-| `thread.join()` | Wait for that thread to terminate | A successful termination observation has defined visibility effects |
-| `object.wait()` | Wait on that object's monitor wait set | Must own that monitor; releases it while waiting and reacquires before return |
-| `notify/notifyAll` | Make monitor waiters eligible to proceed | Must own the same monitor; does not immediately transfer the lock |
-
-### Wait in a loop: wake-up is not the condition itself
-
-```java
-class CompletionSignal {
-    private boolean done;
-
-    synchronized void await() throws InterruptedException {
-        while (!done) {
-            wait();
-        }
-    }
-
-    synchronized void complete() {
-        done = true;
-        notifyAll();
-    }
-}
-```
-
-The loop handles spurious wake-ups and competition with other awakened threads. A notification is not stored for future waiters, but the protected `done` state means a later caller can proceed without waiting. `notify` selects an arbitrary waiter; use it only when the condition protocol makes that safe. Prefer `CountDownLatch`, futures, blocking queues or other higher-level tools for common coordination needs.
-
-#### Foundation: walk the wait/notify handoff one step at a time
-
-For `CompletionSignal`, both synchronized methods use the signal instance as their monitor:
-
-1. The waiting caller acquires that monitor and checks `done`.
-2. If false, `wait()` puts the caller into the object's wait set and releases **that monitor**, not every lock the thread might hold.
-3. The completing caller acquires the monitor, sets `done = true`, and calls `notifyAll()`.
-4. Notification makes waiters eligible to proceed; the completing caller still holds the monitor until it exits the synchronized method.
-5. A waiter must reacquire the monitor before wait returns, then recheck the condition. Notification alone is not permission to skip that check.
-
-Calling wait/notify without owning the target object's monitor throws `IllegalMonitorStateException`. Holding `lockA` and calling `lockB.wait()` does not satisfy the rule. `sleep()` pauses the current thread without releasing its monitors; `join()` waits for a particular thread's termination; `wait()` is about a shared condition guarded by a monitor.
-
-Sleep/yield/priorities are scheduling controls or hints, not a substitute for this handoff. Timed sleep depends on timer/scheduler accuracy and interruption; it provides no precise wake-up deadline or turn-taking guarantee.
-
-### Interrupt is cooperative cancellation
-
-`interrupt()` does not forcibly kill arbitrary code. Blocking interruptible methods may throw `InterruptedException` and clear the interrupt flag; other code must check the flag and honor a cancellation policy. `Thread.interrupted()` checks and clears the **current** thread's flag; `isInterrupted()` checks a thread without clearing it.
-
-If the method can propagate `InterruptedException`, usually propagate it. If an API boundary prevents propagation, restore the flag with `Thread.currentThread().interrupt()` and stop/translate appropriately. Do not catch it and keep running as if cancellation never happened.
-
-**Interview follow-up:** "Can I use a volatile stop flag instead?" It works for a worker that checks it, but will not by itself wake a thread blocked in `take`, `sleep` or I/O. Use the cancellation mechanism appropriate to the blocking API; not every legacy I/O operation responds identically to interruption.
-
-### Deadlock, starvation and livelock
-
-Deadlock: thread A holds lock 1 and waits for lock 2 while thread B holds lock 2 and waits for lock 1. Prevent with consistent lock ordering, smaller lock scope and avoiding external calls while holding locks; timed `tryLock` can support a deliberate failure/retry policy.
-
-Starvation: a thread cannot obtain needed progress/resources. Livelock: threads keep taking actions but make no useful progress, such as mutually conflicting immediate retries. Sleep-based guesses are not a proof of correctness.
-
-`ReentrantLock` supports explicit lock/unlock, timed/interruptible acquisition and conditions. Unlock in `finally` **after successful acquisition**. A fair-lock setting can affect lock acquisition ordering/throughput; it does not guarantee end-to-end scheduler fairness. Use an actual lock requirement to justify it.
-
-## 20. Executors, futures and Java 21 virtual threads
-
-**Deferred:** part of the future multithreading document; no concurrency expansion is included in this revision.
-
-### Foundation: submit tasks to workers instead of starting tasks as threads
-
-A pool contains worker **threads**, which execute submitted **tasks**. Completing a task does not normally destroy the worker; it can execute another task. A queued Runnable is not already a running thread. This is the distinction behind the source's high-level concurrency objects.
-
-| Contract/tool | What it adds |
-| --- | --- |
-| `Executor.execute(Runnable)` | Submit work without specifying how a thread is acquired; an implementation may even run inline |
-| `ExecutorService` | Task submission with futures, lifecycle/shutdown and bulk-execution operations |
-| `ScheduledExecutorService` | Delayed/periodic task submission |
-| `Future<T>` | Handle for a submitted computation's completion, result, failure or cancellation |
-| Concurrent collections | Specified concurrent-access operations, not automatic multi-step business transactions |
-| Atomic variables | Atomic operations on their supported state, not arbitrary multi-field invariants |
-| Locks/conditions | Explicit coordination when their capabilities fit better than intrinsic monitors |
-
-`execute` does not return a future; `submit` does. For tasks submitted with `submit`, inspect the Future or another explicit error-reporting path: an exception can remain captured even though no uncaught stack trace is printed. Shutdown stops new admissions; it does not mean existing tasks have finished. Await completion when required, and define cancellation/deadline policy rather than relying on JVM exit.
-
-### Evolution: separate work from the thread that runs it
-
-| Version | Addition | Practical shift |
-| --- | --- | --- |
-| Java 5 | Executors, `Callable`, `Future`, locks, atomics and concurrent collections | Submit tasks rather than manually creating a thread for every job |
-| Java 7 | Fork/join framework | Efficient decomposition of suitable CPU tasks, not arbitrary blocking work |
-| Java 8 | `CompletableFuture`, parallel streams | Compose results; explicit execution/cancellation policies remain necessary |
-| Java 19 | `ExecutorService` became `AutoCloseable` | Resource syntax can manage executor shutdown; close waits for completion |
-| Java 21 | Virtual threads standardized after previews in Java 19/20 | High concurrency for suitable blocking workloads without one OS thread per task |
-
-`Runnable` produces no result; `Callable<T>` can return a result and throw checked exceptions. `Future.get()` waits and exposes task failure through `ExecutionException`. Timed get limits that wait, not necessarily the task's execution. `cancel(true)` requests interruption; it cannot force non-cooperative code to stop.
-
-Submitting a task safely publishes prior caller actions to that task, and successfully retrieving its result through `Future.get` provides corresponding visibility back to the caller. You still need synchronization for other concurrent shared mutations.
-
-### Pool sizing and backpressure
-
-A fixed thread count is not the same as a bounded system. `Executors.newFixedThreadPool` uses an unbounded queue; `newCachedThreadPool` can create many threads. Both can overload a service under sustained demand.
-
-For platform-thread work, consider an explicitly configured `ThreadPoolExecutor` with measured worker limits, a bounded queue and a deliberate rejection policy. CPU-heavy work is constrained by available CPU; I/O-heavy work also needs limits based on downstream capacity, memory and latency goals.
-
-**Failure scenario:** every worker submits a child task to the same exhausted pool and blocks waiting for it. No worker remains to run the children. Avoid this dependency structure or use suitable non-blocking composition/separate execution policies; merely raising the pool size can postpone the next deadlock.
-
-Scheduled executors replace ad hoc sleeping timer threads. Fixed-rate and fixed-delay scheduling have different timing semantics; an uncaught task exception can suppress later periodic executions. Surface that failure rather than assume the schedule is still healthy.
-
-### CompletableFuture: composition, not hidden error recovery
-
-```java
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
-import java.util.function.Supplier;
-
-class CombinedLookup {
-    static CompletableFuture<String> load(
-            Supplier<String> accountLookup,
-            Supplier<String> preferenceLookup,
-            Executor executor) {
-        var account = CompletableFuture.supplyAsync(accountLookup, executor);
-        var preferences = CompletableFuture.supplyAsync(preferenceLookup, executor);
-        return account.thenCombine(preferences, (a, p) -> a + ":" + p);
-    }
-}
-```
-
-The caller supplies/owns the executor; each supplier must have its own appropriate dependency timeout. The returned future fails if a required lookup fails. Adding `exceptionally(error -> "")` would instead turn that failure into a blank success-looking result unless that is an explicit degraded contract.
-
-`thenApply` transforms a result; `thenCompose` flattens a callback returning another stage. Non-async callbacks may run on a completion/calling thread; async variants use the specified executor or default async facility. Do not accidentally put blocking I/O on the common pool.
-
-`join()` propagates failures through unchecked `CompletionException`; `get()` uses checked `ExecutionException`/`InterruptedException`. Java 9 added timeout helpers such as `orTimeout`; completing a future exceptionally on timeout does not guarantee the underlying network request stops. `CompletableFuture.cancel(true)` itself does not interrupt the underlying computation like an ordinary interruptible task future might.
-
-### Virtual threads: more concurrency, not faster CPU
-
-Virtual threads are scheduled by the runtime onto carrier platform threads. For many supported blocking operations, waiting can unmount a virtual thread so the carrier runs other work. Existing platform threads remain; Java 21 does not silently convert every existing executor or application server to virtual threads.
-
-Use them for many mostly-waiting tasks when the libraries and workload fit. Do not pool virtual threads merely to reuse them; normally use a new virtual thread per task. **Still bound scarce resources and admitted work**: thousands of lightweight threads can still retain too much request data or overwhelm twenty DB connections.
-
-```java
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.Semaphore;
-
-class VirtualLookups {
-    static List<String> fetchAll(List<Callable<String>> lookups, int limit)
-            throws InterruptedException, ExecutionException {
-        if (limit <= 0) {
-            throw new IllegalArgumentException("limit must be positive");
-        }
-        var permits = new Semaphore(limit);
-        var futures = new ArrayList<Future<String>>();
-        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            try {
-                for (var lookup : lookups) {
-                    futures.add(executor.submit(() -> {
-                        permits.acquire();
-                        try {
-                            return lookup.call();
-                        } finally {
-                            permits.release();
-                        }
-                    }));
-                }
-                var results = new ArrayList<String>();
-                for (var future : futures) {
-                    results.add(future.get());
-                }
-                return results;
-            } finally {
-                for (var future : futures) {
-                    future.cancel(true);
-                }
-            }
-        }
-    }
-}
-```
-
-This limits concurrent lookup bodies **per invocation** and preserves input order in the returned list. The lookup must define its own timeout/cancellation behavior. The finally block requests cancellation of unfinished siblings after failure/interruption, and executor close waits for termination; this is not a hard end-to-end deadline if a task ignores interruption.
-
-**Scope matters:** separate calls each create a separate semaphore, so this is not a service-wide or distributed limit. For a service-wide dependency budget, share the limiter at the appropriate lifecycle scope. The example also submits the whole input, so it is suitable only for bounded input; use admission control/windowed submission for an unbounded workload. Ordered `get()` is not fail-fast discovery of every later task's error.
-
-### Java 21-specific caveats to mention in an interview
-
-| Concern | Java 21 guidance |
-| --- | --- |
-| CPU-bound computation | Virtual threads do not add CPU cores; use measured CPU parallelism |
-| Pinning | Blocking while inside a synchronized region, or certain native/foreign calls, can pin a virtual thread to its carrier |
-| Lock choice | Keep locks short; for frequent long blocking operations under a monitor, investigate pinning and an appropriate `ReentrantLock` redesign rather than replacing every synchronized block |
-| ThreadLocal state | Supported, but per-thread large caches become costly with many virtual threads; pooled platform threads also require request-context cleanup |
-| DB/HTTP capacity | Connection pools, rate limits and admission control still govern real throughput |
-| JVM lifetime | Virtual threads are daemon threads; ensure the application waits for required work instead of exiting after launch |
-| Observability | Use supported thread dumps/JFR, latency/queue metrics and pinning diagnostics; do not assume platform-thread counts describe all virtual work |
-
-Thread-local request/security context does not automatically propagate correctly across arbitrary async boundaries. Define propagation and cleanup; `InheritableThreadLocal` is not a universal solution for pooled executors.
-
-**Preview boundary:** structured concurrency and scoped values are preview features in Java 21. They can be discussed as emerging tools, but are not stable APIs assumed by this guide and require explicit preview opt-in. Likewise, Java 21 string templates and unnamed patterns/variables are previews, not ordinary production-baseline syntax.
-
 ## 21. Version recall and practical upgrade decisions
 
 ### Foundation checkpoints before memorizing release numbers
@@ -1914,7 +1561,7 @@ Use these as spoken-answer checks, not coding assignments. If an answer feels li
 | Annotations | Why does adding an annotation not automatically perform its named action? | Metadata requires a processor, interceptor or other consumer |
 | JDBC | Why does executeBatch not make several updates atomic? | Submission strategy and connection-owned transaction boundaries are distinct |
 
-**Coverage boundary:** generics, exceptions, I/O and serialization are developed in the [companion guide](Java-Exceptions-Generics-IO-Serialization.md). Collections and multithreading remain deferred to their own documents; preserved legacy material and release milestones are not requirements for this pass.
+**Coverage boundary:** generics, exceptions, I/O and serialization are developed in the [Exceptions/Generics/IO/Serialization companion guide](Java-Exceptions-Generics-IO-Serialization.md); Java 8 lambdas/streams/Optional/date-time in the [Java 8 companion guide](Java-8-Lambdas-Streams-Optional.md); threads, the memory model, executors and virtual threads in the [Multithreading and Concurrency companion guide](Java-Multithreading-Concurrency.md). Collections remain deferred to their own document; preserved legacy material and release milestones are not requirements for this pass.
 
 ### The memory thread from the old notes to Java 21
 
