@@ -266,6 +266,18 @@ Your dairy app has a custom mapper but only the core starter. Do not assume remo
 
 **Quick recall:** class available is not bean registered; bean registered is not object already created; user bean present means a well-designed missing-bean default backs off.
 
+### The root mechanism behind "how does Boot decide/detect X" questions
+
+A recurring family of interview questions (auto-configuration selection, embedded-server "detection", profile/property precedence, `DataSource` auto-creation, excluding a configuration, `@EnableAutoConfiguration` vs. `@Import`) all reduce to the same three checks already covered above, evaluated once during `AutoConfigurationImportSelector` processing in `refresh()` — not re-checked per request, and not inspecting your code at compile time:
+
+1. **Classpath presence** (`@ConditionalOnClass`) — is the class loadable? (Tomcat vs. Jetty jars present decides which embedded server activates — no "detection" logic, just whichever class exists.)
+2. **Bean registry state** (`@ConditionalOnMissingBean`/`@ConditionalOnBean`) — has something already been registered? User configuration is processed first, so a user-defined bean (e.g. a custom `DataSource`) makes the matching default back off. Two beans of the same type with no way to disambiguate fails at this layer (`NoUniqueBeanDefinitionException`), independent of auto-configuration.
+3. **Resolved property value** (`@ConditionalOnProperty`) — what does `Environment` resolve a key to, after merging ordered `PropertySource`s (profiles, YAML/properties, env vars, CLI args — see §4)? Port priority, profile-specific overrides, and `spring.autoconfigure.exclude` are all just this same property-resolution step, not special-cased parsing.
+
+`@Import` registers a specified configuration unconditionally; `@EnableAutoConfiguration` is the conditional discovery entry point layered on top, driven by the `AutoConfiguration.imports` list plus the three checks above.
+
+**The honest answer to "how does it detect X":** nothing is detected dynamically at runtime — static conditions are evaluated once at startup against what is already true (classpath + registry + resolved properties). Correcting "detection" framing to "conditional registration" is itself a good interview signal.
+
 ## 2. Executable JARs, WARs and containers
 
 Boot's executable archive preserves dependency JARs rather than flattening all their classes into one shaded archive.

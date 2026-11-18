@@ -1,6 +1,6 @@
 # Spring REST + MVC: Interview Notes
 
-Reviewed: October 31, 2026. Source: the four-page Spring REST + MVC PDF, dated May 8, 2017, containing some later Framework 5 material.
+Reviewed: October 31, 2026. Source: the four-page Spring REST + MVC PDF, dated May 8, 2017, containing some later Framework 5 material. Sections 11-15 add architecture/theory and protocol-comparison material from two later PDFs ("REST / SOAP Concepts" and "REST Impl"); JAX-RS-specific recipes from the second PDF are intentionally kept minimal because current REST work is almost always through Spring Boot, not raw JAX-RS/Java EE.
 
 This editorial Markdown conversion retains original subject coverage, replaces stale recipes, and explicitly adds interview gaps. It is not a line-by-line transcript. XML/JSP examples are summarized as legacy recognition material; choose Java configuration for modern examples.
 
@@ -622,6 +622,59 @@ An alternative is shared event fan-out (for example Redis Pub/Sub) to each pod, 
 **Scenario:** one browser stops reading while updates continue. An unbounded queue exhausts memory. Disconnect/resync or coalesce disposable updates according to the contract; retain critical events durably. Kubernetes readiness changes do not migrate existing sockets, and ingress idle timeouts, termination grace periods and heartbeat intervals must work together.
 
 **Final recall:** HTTP status plus body describes a request outcome; WebSocket messages need their own outcome contract. Neither a timeout nor a disconnect proves that no work happened. Security, state consistency and delivery semantics must hold across retries, concurrent callers and pod restarts.
+
+## 11. REST as an architectural style, not a checklist
+
+Fielding's dissertation defines constraints (client-server, statelessness, cacheability, uniform interface, layered system, optional code-on-demand), not a URL-naming convention. Most production "REST" APIs satisfy the easy constraints (statelessness, uniform interface shape) and skip the ones that cost design effort.
+
+**Richardson Maturity Model** (a teaching aid, not an official standard):
+- Level 0: a single endpoint, one POST, custom envelope (RPC-over-HTTP, e.g. most SOAP/XML-RPC).
+- Level 1: resources get distinct URIs, but everything may still use one HTTP method.
+- Level 2: HTTP methods and status codes carry real meaning (`GET` safe/idempotent, `POST` create, `PUT` replace, `DELETE` remove, `404`/`409`/`422` used correctly). Almost every Spring Boot API that reviewers call "RESTful" stops here.
+- Level 3 (HATEOAS): responses include links describing valid next actions, so clients discover transitions instead of hardcoding URLs.
+
+**HATEOAS in practice:** Spring HATEOAS (`EntityModel`, `CollectionModel`, `linkTo().withSelfRel()`) makes level 3 straightforward to produce, but very few real APIs consume the links — client teams hardcode URLs anyway, and link payloads add size/versioning surface. **Interview-honest answer:** "I design to level 2 deliberately and can justify why level 3 is rarely worth it for an internal service with a single, coordinated client team; I'd reach for it for a public API where independent third-party clients benefit from discoverability and reduced URL coupling."
+
+**Common follow-up:** "Is a RESTful API required to be stateless?" Yes for the protocol-level constraint — no client session state is kept on the server between requests. That is compatible with a stateful *backing store* (a database); "stateless" describes the request/response contract, not business data persistence.
+
+## 12. API versioning strategies
+
+| Strategy | Example | Trade-off |
+|---|---|---|
+| URI path | `/v1/orders`, `/v2/orders` | Most visible/cacheable; forces duplicate controllers/routes for breaking changes; easy to explain in an interview. |
+| Query parameter | `/orders?version=2` | Same resource URI, easy to default; less visible, easy to forget in caching/logging rules. |
+| Custom header | `X-API-Version: 2` | Keeps URIs stable; invisible in browser address bars/bookmarks, harder to test manually. |
+| Media type / `Accept` header | `Accept: application/vnd.company.order.v2+json` | Textbook-"purest" REST approach (content negotiation); heavier client tooling, rarely used outside large public APIs. |
+
+Framework 7 added first-class API versioning support (`@ApiVersion`, route-level version matching) so Spring can express any of these without hand-rolled interceptors; see the Change references entry below. **Real-world norm:** URI-path versioning dominates internal/microservice APIs because it is operationally the simplest to route, log, and cache at a gateway; header/media-type versioning shows up mainly in larger public platform APIs (e.g. GitHub, Stripe) that need to evolve many independent client integrations without breaking them.
+
+## 13. Caching and conditional requests
+
+- `Cache-Control`/`Expires` govern whether a client or intermediary may reuse a response without asking the origin again.
+- `ETag` (opaque fingerprint of a representation) and `Last-Modified` enable conditional `GET`: the client sends `If-None-Match`/`If-Modified-Since`; a server that finds nothing changed returns `304 Not Modified` with no body, saving bandwidth without giving up freshness checks.
+- `ETag` also enables **optimistic concurrency on writes**: the client sends `If-Match: <etag>` on `PUT`/`PATCH`/`DELETE`; the server rejects with `412 Precondition Failed` if the resource changed since the client last read it. This is the HTTP-level analogue of JPA `@Version` optimistic locking, and is a cleaner interview answer for "how do you prevent lost updates over REST" than inventing a custom conflict scheme.
+- Spring MVC supports this through `ShallowEtagHeaderFilter` (hash-based, computed after the body is written — useful for free bandwidth savings but does not avoid doing the work) and manual `ResponseEntity` builders (`eTag()`, `lastModified()`) combined with `WebRequest.checkNotModified(...)` for true short-circuiting before expensive work runs.
+
+## 14. SOAP versus REST: the interview-ready comparison
+
+| | SOAP | REST |
+|---|---|---|
+| Contract | WSDL, strongly typed, machine-generated clients | No single mandated contract; OpenAPI/Swagger is the de facto equivalent |
+| Transport | Protocol-agnostic in theory (historically HTTP, SMTP, MQ); in practice almost always HTTP | HTTP-native; verbs and status codes are part of the contract |
+| Payload | XML only, envelope + headers (WS-Security, WS-AtomicTransaction, WS-ReliableMessaging) | Usually JSON; format is not mandated |
+| Built-in standards | Extensive WS-* stack for security/transactions/reliable delivery | None built in; equivalent concerns (auth, idempotency, retries) are assembled from HTTP + application design |
+| Typical home today | Enterprise/B2B integrations with legacy ESBs, banking/EDI systems needing WS-Security/transactions, some government/telecom contracts | Everything else: public APIs, mobile backends, internal microservices |
+
+**Why REST displaced SOAP for most new work:** lower payload/parsing overhead, native HTTP caching and status-code semantics, far simpler client tooling (no SOAP toolkit required), and better fit for browser/mobile clients. **Why SOAP still shows up in interviews about "legacy integration":** some domains genuinely require WS-Security's message-level (not just transport-level) signing/encryption, or WS-AtomicTransaction's distributed-transaction guarantees, which REST has no standardized equivalent for — teams there pay the complexity cost deliberately, not out of inertia. A strong answer names the specific guarantee SOAP provides rather than dismissing it as "just old."
+
+## 15. Search/query API design and filter encoding
+
+Two competing shapes for "search with many optional filters":
+
+- `GET /orders?status=SHIPPED&customerId=42&createdAfter=2026-01-01` — cacheable, bookmarkable, respects `GET` semantics (safe, idempotent), but URL-length limits and awkward range/complex-filter encoding (`createdAfter`/`createdBefore` pairs, or ad hoc LHS/RHS operators like `price>100` vs `price[gt]=100`) push teams toward a body.
+- `POST /orders/search` with a filter object in the body — avoids URL-length/encoding limits and expresses nested/complex criteria cleanly, but breaks `GET` caching and bookmarkability, and is semantically a query, not a resource creation, which trips up teams that map HTTP verbs too literally to CRUD.
+
+**Interview-honest answer:** there is no universally "correct" choice; pick `GET` with query parameters for simple, flat, cacheable filters, and accept a `POST "search" verb` (documented as non-standard but deliberate) once filter complexity or payload size makes query-string encoding unmanageable. Either way, pagination (`page`/`size` or cursor-based `after`/`limit`) and a stable sort order belong in the same contract so results don't shift between pages.
 
 ## Change references
 

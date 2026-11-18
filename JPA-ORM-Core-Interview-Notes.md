@@ -6,7 +6,7 @@ These are framework-agnostic JPA/Hibernate spec notes: entity rules, lifecycle, 
 
 This is an editorial conversion, not a verbatim transcript: outdated package names, deprecated APIs and a couple of oversimplified claims from the 2019 notes are corrected inline.
 
-Companion guides: [Spring Core](Spring-Core-Interview-Notes.md), [Spring Boot](Spring-Boot-Interview-Notes.md), [Spring Data](Spring-Data-Interview-Notes.md).
+Companion guides: [Spring Core](Spring-Core-Interview-Notes.md), [Spring Boot](Spring-Boot-Interview-Notes.md), [Spring Data](Spring-Data-Interview-Notes.md), [SQL](SQL-Interview-Notes.md).
 
 ## Contents
 
@@ -114,7 +114,30 @@ Note the same `merge()` subtlety called out in the Spring Data notes: it never m
 
 ## 7. Locking: optimistic and pessimistic
 
-**Optimistic locking** (`@Version` on a numeric or timestamp column): every update checks the version column in the `WHERE` clause and bumps it; zero rows affected means someone else updated first, surfaced as `OptimisticLockException`. No DB-level lock held between read and write — cheap, but the conflict is only detected at commit/flush time, and the losing side must decide to retry or report a conflict to the user.
+**The DB-level concurrency-control split these two modes sit on top of:** every "optimistic vs pessimistic" choice in JPA is really a choice between two families of database concurrency control — **two-phase locking (2PL)**, where a transaction acquires a lock before touching a row and holds it until commit (conflicts are *prevented* by blocking), and **MVCC/optimistic concurrency control (OCC)**, where a transaction reads a consistent snapshot and conflicts are only *detected* at commit time. JPA's `PESSIMISTIC_*` lock modes are 2PL applied at the ORM level (`SELECT ... FOR UPDATE`, holding a row lock from read to commit — a **shared** lock for `PESSIMISTIC_READ` lets other readers through but blocks writers, an **exclusive** lock for `PESSIMISTIC_WRITE` blocks both, and a transaction asking for a lock already held by another simply queues behind it until release or timeout); `@Version`-based optimistic locking is OCC applied at the ORM level (read a version, re-check it at the final `UPDATE`). Most mainstream RDBMSes (Oracle, PostgreSQL, SQL Server's `READ_COMMITTED_SNAPSHOT`) default to MVCC for ordinary reads regardless of which JPA lock mode you pick — pessimistic locking is layered *on top of* that engine, not a replacement for it.
+
+That engine-level behavior is governed by the connection's **isolation level**, independent of JPA's lock modes — isolation controls what a plain `SELECT` is allowed to see while other transactions are in flight; locking controls what you do about a conflict once you've decided to prevent or detect it:
+
+| Isolation level | Dirty read | Non-repeatable read | Phantom read | JDBC constant |
+|---|---|---|---|---|
+| `READ_UNCOMMITTED` | Possible | Possible | Possible | `Connection.TRANSACTION_READ_UNCOMMITTED` (1) |
+| `READ_COMMITTED` | Prevented | Possible | Possible | `Connection.TRANSACTION_READ_COMMITTED` (2) |
+| `REPEATABLE_READ` | Prevented | Prevented | Possible (standard-defined; some MVCC engines also block most phantoms in practice) | `Connection.TRANSACTION_REPEATABLE_READ` (4) |
+| `SERIALIZABLE` | Prevented | Prevented | Prevented | `Connection.TRANSACTION_SERIALIZABLE` (8) |
+
+- **Dirty read**: transaction A reads a row transaction B has modified but not yet committed; if B rolls back, A read data that never existed.
+- **Non-repeatable read**: A reads the same row twice in one transaction and gets different values because B committed an update to it in between.
+- **Phantom read**: A re-runs the same range query twice and gets a different *set of rows* because B inserted/deleted a row matching the predicate in between.
+- **Lost update**: A and B both read the same row, both write back based on that stale read, and one write silently overwrites the other — this is exactly the anomaly `@Version`-based optimistic locking exists to catch (the second writer gets `OptimisticLockException` instead of silently clobbering the first).
+- **Write skew**: A reads a value and writes based on it, B does the same for a *different but related* row, and both commit even though the combination violates an invariant neither transaction's individual write-set would catch on its own — the classic failure mode `SERIALIZABLE` (or an explicit application-level check/constraint) guards against, since optimistic locking on either row alone doesn't see the cross-row invariant.
+
+Spring Boot/Hibernate default to `READ_COMMITTED` (the JDBC driver/DB default) unless you set `@Transactional(isolation = ...)` or a Hibernate connection property — in practice, most teams leave the global isolation level at the default and reach for `@Version` optimism or an explicit pessimistic lock on the *specific* operation that needs a stronger guarantee, rather than raising isolation globally and paying its concurrency/throughput cost on every transaction.
+
+**Optimistic locking** (`@Version` on a numeric or timestamp column): every update checks the version column in the `WHERE` clause and bumps it; zero rows affected means someone else updated first, surfaced as `OptimisticLockException`. No DB-level lock held between read and write — cheap, but the conflict is only detected at commit/flush time, and the losing side must decide to retry or report a conflict to the user. This also makes it the natural fit for detached-entity/web-tier flows (edit form → submit later): there's no lock held across the request boundary the way a pessimistic lock would require.
+
+`@Version` field rules (spec-level, not Hibernate-specific): the type must be one of `int`/`Integer`/`long`/`Long`/`short`/`Short`/`java.sql.Timestamp`; an entity may declare **exactly one** version attribute; for an entity mapped across a primary and secondary table, the version attribute must live in the **primary table**; and the application must never manually set or increment it — that's the provider's job, every time.
+
+Recovering from `OptimisticLockException`: since the exception can mark the current transaction rollback-only, the standard pattern is reload/refresh the entity — preferably in a **new** transaction — before retrying the update, not just retry inside the same (possibly already-doomed) transaction.
 
 **Pessimistic locking**: acquires a DB-level lock (`SELECT ... FOR UPDATE` or equivalent) up front, blocking other transactions from acquiring a competing lock until commit/rollback. Full `LockModeType` enum:
 
@@ -122,7 +145,7 @@ Note the same `merge()` subtlety called out in the Spring Data notes: it never m
 |---|---|
 | `NONE` | No lock requested |
 | `OPTIMISTIC` (was `READ`) | Checks version at commit without extra locking |
-| `OPTIMISTIC_FORCE_INCREMENT` (was `WRITE`) | Like `OPTIMISTIC`, but forces a version increment even without a detectable field change — use when a *relationship* change should still trigger optimistic conflict detection on the parent |
+| `OPTIMISTIC_FORCE_INCREMENT` (was `WRITE`) | Like `OPTIMISTIC`, but forces a version increment even without a detectable field change — use when a *relationship* change should still trigger optimistic conflict detection on the parent. The spec leaves the increment's exact timing unspecified: a provider may apply it at flush time or defer it to commit. |
 | `PESSIMISTIC_READ` | Shared lock; blocks concurrent writers, typically allows concurrent readers (DB-dependent) |
 | `PESSIMISTIC_WRITE` | Exclusive lock; blocks concurrent readers and writers requesting a lock |
 | `PESSIMISTIC_FORCE_INCREMENT` | Exclusive lock plus forced version bump |
@@ -132,6 +155,8 @@ You can request a lock mode via `find(Class, id, LockModeType)`, `Query`/`TypedQ
 **Lock scope** (`PessimisticLockScope`): `NORMAL` locks only the entity's own row; `EXTENDED` also locks rows in any joined collection tables mapped by that entity — relevant when a parent's locked state should also block changes to a dependent join table.
 
 **Lock timeout**: set via the standard `jakarta.persistence.lock.timeout` property (milliseconds; `0` means no-wait/fail-fast, a negative value typically means block indefinitely, both provider-interpreted). Always have an explicit timeout policy in a high-concurrency system — unbounded blocking pessimistic locks are a common source of production deadlocks/thread-pool exhaustion, which is exactly why "avoid synchronization constructs" instincts from plain Java carry over here: DB locks have the same contention cost as `synchronized`, just distributed across connections instead of threads.
+
+**Pessimistic lock-failure exceptions aren't interchangeable in rollback scope**: `PessimisticLockException` marks the whole **transaction** for rollback (the failure is transaction-level); `LockTimeoutException` is narrower — only the failing **statement** is affected, so the transaction can still continue and retry the same operation; anything else provider-specific surfaces as a plain `PersistenceException`. Knowing which one you caught tells you whether "just retry" is even possible without a fresh transaction.
 
 ## 8. Caching: first-level, second-level, and query cache
 
@@ -158,6 +183,8 @@ Collections can be cached too (`@Cache` on the collection-valued field/getter, s
 This section is deliberately framed around your actual background — container-managed JPA in EJB — since it maps directly onto how Spring explains the same concepts, just with different vocabulary.
 
 **JTA (Java Transaction API)** coordinates a transaction across multiple enlisted resources (e.g., two different databases, or a database plus a JMS queue) via a **transaction manager** acting as coordinator and resource managers implementing the **XA** protocol. **Two-phase commit (2PC)**: phase 1, the coordinator asks every enlisted resource to *prepare* (durably record it can commit); phase 2, once all resources vote "yes," the coordinator tells all of them to *commit* (or, if any voted "no," tells all to *rollback*). This is what gives you atomicity across heterogeneous resources — and its real cost: XA resources are slower (extra round trips, durable prepare records) and a coordinator crash between phase 1 and phase 2 can leave a resource "in doubt" until manual/automatic recovery — which is why most single-database Spring Boot apps deliberately avoid JTA/XA and use a local `JpaTransactionManager` instead (see [Spring-Data-Interview-Notes.md §2](Spring-Data-Interview-Notes.md#2-transaction-managers-and-boundaries)), reserving JTA for the genuine multi-resource case.
+
+**Where ACID fits in:** 2PC is specifically how JTA protects **atomicity** across multiple enlisted resources (all commit or none do), and transitively their individual **durability** (each resource's own commit record survives a crash once phase 2 completes). **Consistency** (your invariants hold before and after) is mostly an application/schema-constraint concern that 2PC doesn't buy you by itself; **isolation** is the connection-level setting from §7, orthogonal to whether 2PC is involved at all. A single-resource local transaction (`JpaTransactionManager`) gets atomicity, isolation, and durability from that one database engine for free and never needs 2PC — you only pay 2PC's extra-round-trip, in-doubt-on-crash cost when atomicity has to span more than one resource manager.
 
 **JTA with vs. without Jakarta EE**: inside a full Jakarta EE/application-server container, JTA's `UserTransaction`/container-managed transactions are provided automatically and EJBs get declarative transaction demarcation (`@TransactionAttribute`) for free. Outside a full EE container (e.g., a plain Spring Boot app), you need a standalone JTA implementation (Atomikos, Bitronix, Narayana) wired in explicitly if you actually need distributed transactions — it isn't available "for free" the way it was in your EJB container.
 
@@ -193,9 +220,46 @@ Quick-recall table for annotations that come up but rarely get their own flashca
 
 **Orphan removal vs `CascadeType.REMOVE`:** both can delete child rows, but `orphanRemoval = true` additionally deletes a child **the moment it's removed from the owning collection**, even if you never called `remove()` on the parent or the child directly — modeling true ownership ("this child cannot exist without this exact parent"). `CascadeType.REMOVE` only propagates when the parent itself is explicitly removed; it does **not** fire just because a child was unlinked from a collection. Use `orphanRemoval` for genuine composition (order → order lines); reach for plain `CascadeType.REMOVE` when the child is still independently addressable and deletion should only follow explicit parent deletion, not an in-memory collection edit.
 
+**Real-world history (late-2000s EJB/OpenJPA projects):** `orphanRemoval` is a JPA **2.0** addition (2009) — JPA 1.0 (2006, bundled with Java EE 5) had no portable concept of it at all. Teams on JPA 1.0 providers, including early OpenJPA, could only cascade via `CascadeType.REMOVE`, which — as above — only fires on explicit parent deletion, not on unlinking a child from a collection. The practical consequence: code that did `parent.getChildren().remove(child)` and expected the DB row to go away silently left orphaned rows behind, because that pattern needs `orphanRemoval`, not `CascadeType.REMOVE`, and `orphanRemoval` simply didn't exist yet on JPA 1.0. Early JPA 2.0-era provider implementations (including OpenJPA) also had real maturity gaps once `orphanRemoval` did land — incomplete support in edge cases (nested/transitive associations, certain collection types) that caused the same symptom even after upgrading the spec version, until later provider releases caught up. This is a good concrete answer if asked "have you seen orphan management go wrong in practice?" — it's a spec-version/provider-maturity story, not a conceptual misunderstanding of cascades.
+
 ## 12. `EntityGraph`, `Cache`, and `Metamodel` interfaces
 
-**`EntityGraph`** (`@NamedEntityGraph` or built programmatically via `EntityManager.createEntityGraph()`) declaratively specifies which associations to fetch eagerly for one particular query, without changing the entity's default `FetchType` everywhere — the cleanest fix for the one-to-one/N+1 situations in §6 when you don't want to make an association eager globally. Apply it with the `jakarta.persistence.fetchgraph` (only listed attributes are fetched, everything else uses its default) or `jakarta.persistence.loadgraph` (listed attributes are fetched eagerly, unlisted ones keep their mapped default) query hints — the distinction between those two hint types is a frequent follow-up.
+**`EntityGraph`** (`@NamedEntityGraph` or built programmatically via `EntityManager.createEntityGraph()`) is a **JPA 2.1** addition (2013), not 2.0 — don't confuse it with `orphanRemoval`/Criteria API, which landed in 2.0 (2009). It declaratively specifies which associations to fetch eagerly for one particular query, without changing the entity's default `FetchType` everywhere — the cleanest fix for the one-to-one/N+1 situations in §6 when you don't want to make an association eager globally. Apply it with the `jakarta.persistence.fetchgraph` (only listed attributes are fetched, everything else uses its default) or `jakarta.persistence.loadgraph` (listed attributes are fetched eagerly, unlisted ones keep their mapped default) query hints — the distinction between those two hint types is a frequent follow-up.
+
+```java
+@Entity
+@NamedEntityGraph(
+    name = "Order.withLinesAndCustomer",
+    attributeNodes = {
+        @NamedAttributeNode("lines"),
+        @NamedAttributeNode("customer")
+    }
+)
+public class Order {
+    @OneToMany(mappedBy = "order") // default LAZY, as usual
+    private List<OrderLine> lines;
+
+    @ManyToOne // default EAGER, but graph makes the intent explicit either way
+    private Customer customer;
+    // ...
+}
+
+// At the call site: fetch exactly what this one query needs, nothing else.
+EntityGraph<?> graph = em.getEntityGraph("Order.withLinesAndCustomer");
+Order order = em.find(Order.class, orderId,
+        Map.of("jakarta.persistence.fetchgraph", graph));
+// lines and customer come back populated in this single query (join-fetched);
+// every other @OneToMany/@ManyToOne on Order not listed stays LAZY/unfetched.
+
+// Programmatic (ad hoc) equivalent, without a @NamedEntityGraph:
+EntityGraph<Order> adHoc = em.createEntityGraph(Order.class);
+adHoc.addAttributeNodes("lines", "customer");
+TypedQuery<Order> query = em.createQuery(
+        "select o from Order o where o.status = :status", Order.class);
+query.setHint("jakarta.persistence.fetchgraph", adHoc);
+```
+
+Swap `"jakarta.persistence.fetchgraph"` for `"jakarta.persistence.loadgraph"` if you want the listed attributes eager *plus* whatever `FetchType` each unlisted attribute already has mapped (rather than `fetchgraph`'s "everything unlisted falls back to its default," which in practice is usually indistinguishable unless an unlisted association is itself mapped `EAGER`).
 
 **`Cache` interface** (`EntityManagerFactory.getCache()`): programmatic L2 cache control — `contains(Class, id)`, `evict(Class, id)`, `evictAll()` — useful for manual invalidation after a bulk update/delete that bypasses the persistence context (see §6/Spring-Data notes on bulk operations leaving cache/managed state stale).
 
@@ -218,7 +282,7 @@ The honest trade-off, not a one-sided pitch:
 
 ## 14. JPA 2.1 and later: what actually changed
 
-From the 2019 notes' "JPA 2.1 new features" list, the durable ones worth remembering: `AttributeConverter` (`@Convert`), stored procedure support (`@NamedStoredProcedureQuery`), synchronized persistence contexts with external resource-local transactions (`@SynchronizationType`), the `CriteriaUpdate`/`CriteriaDelete` bulk-operation APIs, and schema generation properties. Since then, the bigger practical shift for interviews is the **Jakarta EE namespace migration** (`javax.persistence` → `jakarta.persistence` from Jakarta EE 9 onward) — know that this is a package rename driven by Oracle's trademark transfer of "Java EE" to the Eclipse Foundation, not a behavioral spec change, so legacy `javax`-based code isn't "wrong," just on an older namespace.
+From the 2019 notes' "JPA 2.1 new features" list, the durable ones worth remembering: `EntityGraph` (`@NamedEntityGraph`, `createEntityGraph()`, `fetchgraph`/`loadgraph` hints — see §12), `AttributeConverter` (`@Convert`), stored procedure support (`@NamedStoredProcedureQuery`), synchronized persistence contexts with external resource-local transactions (`@SynchronizationType`), the `CriteriaUpdate`/`CriteriaDelete` bulk-operation APIs, and schema generation properties. Since then, the bigger practical shift for interviews is the **Jakarta EE namespace migration** (`javax.persistence` → `jakarta.persistence` from Jakarta EE 9 onward) — know that this is a package rename driven by Oracle's trademark transfer of "Java EE" to the Eclipse Foundation, not a behavioral spec change, so legacy `javax`-based code isn't "wrong," just on an older namespace.
 
 ## 15. Bridging this to Spring Boot / Spring Data interviews
 
@@ -228,6 +292,22 @@ If asked "you haven't used Spring Data — can you still work with JPA in Spring
 2. **Spring Data JPA:** builds repository proxies *over* that same `EntityManager`/JPA layer — `save()` still resolves to `persist()`/`merge()` underneath (see [Spring-Data-Interview-Notes.md §4](Spring-Data-Interview-Notes.md#4-jpa-state-and-entitymanager)), derived query methods generate JPQL for you, and `Page`/`Slice` wrap the same count/limit-offset SQL you'd otherwise hand-write. None of your lifecycle/locking/caching/inheritance knowledge from this document becomes obsolete — Spring Data is a convenience layer on top of it, not a replacement for it.
 
 Framing for an interview: "My production JPA experience is container-managed under EJB rather than Spring Data, but the persistence semantics — entity lifecycle, locking, caching, N+1, transaction boundaries — are the same spec either way. Spring Data's `save()`/derived queries are a thin layer over the `EntityManager` calls I've already written by hand, and I've since worked with Spring Boot + JPA directly, so adopting Spring Data's repository conventions on a new codebase is a quick ramp-up, not a gap."
+
+### "Spring Data JPA instead of Hibernate, for portability" — what that claim actually means
+
+A common justification for leaning on Spring Data JPA over a provider's native API: it's framed as "portability," but it's worth being precise about what's portable and what isn't, since the loose version of this claim doesn't survive a follow-up question.
+
+- **It's a false dichotomy to start with.** Spring Data JPA is a repository/convenience layer written *against the JPA spec* — it still needs a JPA **provider** underneath to do the actual O/R mapping and SQL generation, and in the overwhelming majority of real projects that provider is Hibernate. Choosing Spring Data JPA doesn't remove Hibernate from the stack; it just means application code talks to `JpaRepository`/`EntityManager` instead of Hibernate's native `Session`/`Criteria` APIs.
+- **What JPA actually makes portable is the *provider*, not the database.** In theory you could swap Hibernate for EclipseLink or OpenJPA without rewriting entities/queries, because they all implement the same spec. SQL dialect differences (pagination syntax, `LIMIT` vs `ROWNUM`, vendor functions) are abstracted by Hibernate's `Dialect` layer — a Hibernate feature, present whether or not Spring Data sits on top.
+- **Honest caveat:** provider-swap portability is almost never exercised in practice. Teams pick Hibernate once and stay on it for the application's lifetime. It's a textbook answer, rarely a lived benefit — say so if asked, rather than overstating it.
+- **The justification that actually holds up in practice:** less boilerplate (derived query methods, `Specification`/`Pageable`, auditing, transaction management vs hand-rolled `Session`/`Criteria` code), and team/hiring portability — more engineers know the standard `EntityManager`/Spring Data vocabulary than Hibernate-native internals, since it's the common denominator across JPA providers and Spring shops. It also avoids casual lock-in to Hibernate-specific idioms in everyday CRUD code, even though Hibernate is still doing the work underneath.
+- **General real-world norm — escape hatches in order of how often they're actually reached for:**
+  1. **JPQL** — the default, covers most queries.
+  2. **Native SQL *inside* JPA/Spring Data** (`@Query(nativeQuery = true)`, or `JdbcTemplate`/jOOQ alongside the repository layer) — by far the most common escape hatch once JPQL can't express something cleanly (complex joins, window functions, DB-specific syntax). No new API to learn, stays inside the repository pattern.
+  3. **Native Hibernate API** (`EntityManager.unwrap(Session.class)`, `StatelessSession`, `@Filter`, batch-size/flush-mode tuning) — narrower and rarer; reached for specific technical needs JPA has no portable equivalent for, not as a general query escape hatch. Note this isn't "JPA can't do bulk inserts": plain `EntityManager.persist()` in a loop with periodic `flush()`/`clear()` and `hibernate.jdbc.batch_size` set already produces real JDBC batch `INSERT`s, and that's the standard approach for moderate volumes. `StatelessSession` is reached for only when per-entity overhead from the persistence context — first-level cache growth, dirty-checking, cascades/entity-listener callbacks firing on every row — becomes a measurable problem at very large volumes (e.g. millions of rows), since it bypasses the persistence context entirely.
+  4. **Raw JDBC/jOOQ** as a parallel, non-JPA path — for reporting-heavy or performance-critical reads where even native SQL inside JPA adds unwanted overhead.
+
+  This mirrors the "abstraction for the common case, escape hatch for the hard case" trade-off from the ORM-vs-JDBC discussion in §13, just with a second, more fine-grained escape hatch (native SQL before native Hibernate) in between.
 
 ## 16. Interview questions
 
