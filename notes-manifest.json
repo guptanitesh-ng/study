@@ -7,6 +7,11 @@
       "bytes": 118306
     },
     {
+      "path": "Caching-Interview-Notes.md",
+      "title": "Caching and Redis: Interview Notes",
+      "bytes": 13537
+    },
+    {
       "path": "Java-Core-Interview-Notes.md",
       "title": "Core Java: Practical Interview Notes through Java 21",
       "bytes": 110213
@@ -17,14 +22,14 @@
       "bytes": 22166
     },
     {
-      "path": "Java-Multithreading-Concurrency.md",
-      "title": "Java Multithreading and Concurrency",
-      "bytes": 63701
-    },
-    {
       "path": "Java-Collections-DataStructures.md",
       "title": "Java Collections and Data Structures",
-      "bytes": 29120
+      "bytes": 32194
+    },
+    {
+      "path": "Java-Multithreading-Concurrency.md",
+      "title": "Java Multithreading Concurrency",
+      "bytes": 95863
     },
     {
       "path": "Java-Exceptions-Generics-IO-Serialization.md",
@@ -32,9 +37,19 @@
       "bytes": 75354
     },
     {
+      "path": "JPA-ORM-Core-Interview-Notes.md",
+      "title": "JPA and ORM Core: Interview Notes",
+      "bytes": 48042
+    },
+    {
+      "path": "Message-Middleware-Interview-Notes.md",
+      "title": "Message Middleware: JMS, MDBs and the Kafka Gap",
+      "bytes": 11560
+    },
+    {
       "path": "Spring-Boot-Interview-Notes.md",
       "title": "Spring Boot: Interview Notes",
-      "bytes": 59477
+      "bytes": 64427
     },
     {
       "path": "Spring-Core-Interview-Notes.md",
@@ -49,12 +64,17 @@
     {
       "path": "Spring-REST-MVC-Interview-Notes.md",
       "title": "Spring REST + MVC: Interview Notes",
-      "bytes": 56019
+      "bytes": 63811
     },
     {
       "path": "Spring-Security-Interview-Notes.md",
       "title": "Spring Security: Interview Notes",
-      "bytes": 20875
+      "bytes": 22007
+    },
+    {
+      "path": "SQL-Interview-Notes.md",
+      "title": "SQL: Interview Notes",
+      "bytes": 16657
     }
   ]
 }

@@ -292,11 +292,25 @@ application.jar
 
 The launcher sets up nested-archive loading and invokes the application's main class. A modern manifest uses `org.springframework.boot.loader.launch.JarLauncher` as `Main-Class`, and the application class as `Start-Class`. The PDF's `org.springframework.boot.loader.JarLauncher` is historical. Let the Boot build plugin generate the archive rather than manually editing its manifest.
 
-`JarLauncher`, `WarLauncher`, and `PropertiesLauncher` serve different archive/loading arrangements. `classpath.idx` describes classpath ordering; `layers.idx` describes image layers for supported archives. Layering helps reuse unchanged dependencies between image builds; it is not a runtime isolation boundary.
+Three launchers cover different archive arrangements:
+
+- `JarLauncher` — boots a plain executable JAR (`BOOT-INF/classes` + `BOOT-INF/lib`).
+- `WarLauncher` — boots the same layout when packaged as an executable WAR.
+- `PropertiesLauncher` — reads classpath entries from external config instead of the manifest, useful when the classpath needs to be customized post-build without repackaging.
+
+Two index files support this: `classpath.idx` fixes classpath ordering so the launcher assembles it deterministically, and `layers.idx` groups the archive into image layers for supported archives. Layering helps reuse unchanged dependencies between image builds; it is not a runtime isolation boundary.
 
 An executable JAR normally uses `SpringApplication.run`. A traditional WAR can use `SpringBootServletInitializer.configure` to integrate with an external Servlet container. `@SpringBootApplication` and `SpringBootServletInitializer` are complementary, not alternatives.
 
-Container images can be built with a Dockerfile or Cloud Native Buildpacks. **Added:** discuss non-root execution, image patching, resource limits, reproducible builds, graceful shutdown, health probes and secret injection. Shipping a container does not itself make an application cloud-native.
+Container images can be built with a Dockerfile or Cloud Native Buildpacks. Shipping a container does not itself make an application cloud-native — operational concerns still need to be addressed:
+
+- **Non-root execution** — run as an unprivileged user so a container compromise does not grant host-level or root capabilities.
+- **Image patching** — rebuild base images on a cadence to pick up OS/CVE fixes rather than letting a built image go stale.
+- **Resource limits** — set CPU/memory requests and limits so one container cannot starve others on a shared node.
+- **Reproducible builds** — pin base image digests and dependency versions so the same source always produces the same image.
+- **Graceful shutdown** — handle `SIGTERM` (Boot's `server.shutdown=graceful`) so in-flight requests finish before the container exits.
+- **Health probes** — expose liveness/readiness endpoints (commonly via Actuator) so the orchestrator can detect and replace unhealthy instances.
+- **Secret injection** — mount secrets at runtime (env vars, volumes, a secret manager) instead of baking them into the image.
 
 ### Sample: build, launch, and distinguish JAR from WAR
 
@@ -360,7 +374,7 @@ class StartupOptions implements ApplicationRunner {
 
 For `java -jar orders.jar --verify input.csv`, the parsed option is `verify` and the positional argument is `input.csv`. `CommandLineRunner` instead receives the raw argument strings. `@Order` can order runners; it is not a general dependency-management mechanism.
 
-**Scenario:** a runner is still loading essential local data while the port is open. Readiness routing should withhold traffic until startup completes. A thrown runner exception fails startup; a never-ending runner can keep readiness from reaching its normal accepting state. Do not hide failure or wait indefinitely for remote infrastructure.
+**Scenario: a runner is still loading essential local data while the port is open. Readiness routing should withhold traffic until startup completes. A thrown runner exception fails startup; a never-ending runner can keep readiness from reaching its normal accepting state. Do not hide failure or wait indefinitely for remote infrastructure.**
 
 ```properties
 spring.main.lazy-initialization=true
@@ -597,13 +611,15 @@ Boot simplifies constructing and running an application. Spring Cloud adds integ
 | Netflix / Eureka | Understand discovery; Kubernetes or another platform may supply it instead. Do not revive retired Netflix components from old tutorials. |
 | Stream | Broker integration; understand delivery guarantees, ordering, retries and idempotent consumers. |
 | "Spring Cloud Security" | Do not treat this historical umbrella as the default security implementation. Study current Spring Security OAuth2 client/resource-server support. |
-| Gateway | Routing, filters and edge policies; business authorization still belongs downstream. |
+| Gateway | **Not required merely because there are multiple services — plain path/host routing is also what a Kubernetes Ingress controller or a managed API Gateway already does at the infra layer. Reach for it specifically for in-process, programmable edge logic Ingress can't express: request/response rewriting, header injection, pre-forward auth-token validation, per-route rate limiting, request aggregation, or routing on business/feature-flag logic rather than path alone. Business authorization still belongs downstream.** |
 | OpenFeign | Useful in existing systems; also learn Spring HTTP Service Clients and check the chosen release train's guidance. |
 | "Spring Cloud Secure Vault" | The actual project name is **Spring Cloud Vault**. |
 | Function | Functional application adapters, including serverless deployment options. |
 | Circuit Breaker | An abstraction for supported implementations; separate circuit breaking from retry and timeout. |
 
 Use the Spring Cloud compatibility matrix/release train for the selected Boot generation; do not independently select the newest version of every Cloud module.
+
+**Real-world adoption pattern:** teams increasingly reach for thin, targeted libraries over the full Cloud umbrella — Resilience4j directly (the Circuit Breaker abstraction adds little now that Hystrix is dead and Resilience4j is the only real implementation), and Micrometer Tracing with an OpenTelemetry exporter instead of a Cloud-specific tracing module. Config Server and Eureka are commonly dropped on Kubernetes in favor of ConfigMaps/Secrets and Service DNS. Larger, polyglot organizations push retries/circuit-breaking/mTLS into a service mesh (Istio, Linkerd) instead of app code, since a Spring-only answer doesn't help non-Java services. Gateway remains the module with the broadest ongoing adoption, since it is an in-process API gateway/BFF that Ingress/Gateway CRDs don't replace.
 
 ### Scenario: an order service calls a delivery service
 
@@ -817,7 +833,7 @@ Coordinate routing removal and platform grace periods, close resources, and use 
 
 ### 9.19 Is Spring Cloud required on Kubernetes?
 
-**Answer:** no. Choose it for specific integration needs, not because of the hosting platform. Kubernetes may already provide discovery/configuration capabilities, while broker integrations or circuit-breaker abstractions may still be useful.
+**Answer:** no. Choose it for specific integration needs, not because of the hosting platform. The overlap comes from core Kubernetes primitives, not from any specific managed provider (AKS, EKS, GKE, or on-prem all give the same baseline): Services/DNS subsume Spring Cloud discovery (Eureka), and ConfigMaps/Secrets subsume Spring Cloud Config Server. Kubernetes does not natively give you application-level circuit breaking, client-side load-balancing retries, or distributed-trace propagation — those remain Spring Cloud (Resilience4j, Spring Cloud LoadBalancer, Micrometer tracing) concerns unless a service mesh (Istio, Linkerd) is added for infra-level retries/circuit-breaking instead.
 
 Always match the Cloud release train to the Boot generation.
 

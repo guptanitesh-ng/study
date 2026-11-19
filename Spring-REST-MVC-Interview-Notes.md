@@ -6,15 +6,6 @@ This editorial Markdown conversion retains original subject coverage, replaces s
 
 Study sequence: [Core](Spring-Core-Interview-Notes.md) -> [Boot](Spring-Boot-Interview-Notes.md) -> **REST + MVC** -> [Data](Spring-Data-Interview-Notes.md) -> [Security](Spring-Security-Interview-Notes.md).
 
-## Relevance and original-topic coverage
-
-| PDF pages | Original coverage | Assessment |
-|---|---|---|
-| 1-2 | Negotiation, converters, body annotations, error handling | Still fundamental; extension-based negotiation and broad exception-handler claims need corrections. |
-| 2-3 | RestTemplate, mappings, HTTP statuses | Keep legacy-client recognition; add RestClient, WebClient and HTTP interfaces. |
-| 3 | DispatcherServlet, contexts, view resolvers | High value for architecture; XML startup defaults are not modern Boot setup. |
-| 3-4 | Validation, exception views, localization | Keep; update Jakarta imports, method validation and interceptor configuration. |
-
 ## 1. Servlet MVC request flow
 
 For a request mapped to Spring MVC, the useful mental model is:
@@ -168,6 +159,18 @@ The original "look at .json/.xml before Accept" behavior reflects old path-exten
 Successful DELETE can return `204` without a body, `200` with a representation describing the result, or `202` when accepted for asynchronous processing. The original table's 200/204 options are useful but not exhaustive.
 
 Know `400`, `401`, `403`, `404`, `409`, `415`, `422`, `429` and `5xx` without treating one as a universal answer for every validation or domain failure. Distinguish syntax/binding errors, business conflicts and authentication/authorization failures.
+
+| Code | Meaning in a REST API |
+| --- | --- |
+| 400 | Malformed/unparsable request — bad JSON, wrong type, failed bean validation. |
+| 401 | Caller isn't authenticated at all — missing/invalid credentials or token. |
+| 403 | Caller is authenticated but not allowed to perform this action. |
+| 404 | No resource at this URI, or it's hidden from this caller to avoid leaking existence. |
+| 409 | Request conflicts with current resource state (e.g. stale version, duplicate, illegal transition). |
+| 415 | `Content-Type` of the request body isn't one the endpoint accepts. |
+| 422 | Syntactically valid but semantically invalid — passes parsing, fails business rules. |
+| 429 | Caller exceeded a rate limit; usually paired with `Retry-After`. |
+| 5xx | Server-side failure — unhandled exception, dependency outage, timeout; never the client's fault. |
 
 For retryable writes, design idempotency keys/deduplication and ownership checks. Also study caching, ETags/conditional requests, pagination limits and API evolution.
 

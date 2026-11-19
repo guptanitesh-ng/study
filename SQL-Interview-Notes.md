@@ -16,6 +16,7 @@ Companion guides: [JPA/ORM Core](JPA-ORM-Core-Interview-Notes.md), [Spring Data]
 6. Reading execution plans
 7. Procedural SQL: cursors, procedures vs functions, packages, triggers
 8. Interview questions
+9. Postgres: governance, extensibility, and how it compares
 
 ## 1. Joins
 
@@ -59,7 +60,7 @@ Foreign keys carry an `ON DELETE`/`ON UPDATE` action: `CASCADE` (deleting the pa
 
 ## 5. Query tuning checklist
 
-- **Avoid `SELECT *`**: pulls columns you don't need (I/O and network cost), and defeats a covering index that would otherwise have satisfied the query without a table lookup.
+- **Avoid `SELECT *`**: pulls columns you don't need (I/O and network cost). An index's *seek* role (finding matching rows via the predicate) is unaffected by which columns you select — but its *covering* role (satisfying the whole query from the index alone, with no lookup back to the table) depends on the output columns too. `SELECT *` forces every column into the output, so even a perfectly-matched index can't cover it, and the engine pays a key/bookmark lookup per row it would otherwise have avoided.
 - **Don't wrap an indexed column in a function or do an implicit type conversion in the predicate** (`WHERE UPPER(last_name) = 'SMITH'`, or comparing a `VARCHAR` column to a numeric literal that forces an implicit cast): the index is built on the raw column value, so the engine can't use it to seek — it falls back to scanning every row and applying the function per row. Either index the expression itself (a function-based/expression index, where supported) or restructure the predicate to leave the column bare.
 - **Leading wildcard `LIKE '%term'` can't use a standard B+ tree index** (it doesn't know where in the sorted order a mid-string match would start) — `LIKE 'term%'` can. If leading-wildcard search is a real requirement, that's a sign you need a different structure entirely (full-text index, trigram index), not a bigger regular index.
 - **Rewrite correlated subqueries as joins where possible**: a correlated subquery re-executes once per outer row; the optimizer sometimes flattens it into a join automatically, but don't count on it — write the join explicitly when the logic allows it.
@@ -98,3 +99,34 @@ Oracle: `EXPLAIN PLAN FOR <query>` then query `PLAN_TABLE` (or just turn on `SET
 8. Column order in a composite index — why does `(last_name, first_name)` not help a query that filters on `first_name` alone?
 9. What's the difference between `WHERE` and `HAVING`, and why does putting a filterable condition in `HAVING` by mistake cost you performance?
 10. How do you read an execution plan well enough to tell your team *why* a query is slow, not just *that* it is?
+
+## 9. Postgres: governance, extensibility, and how it compares
+
+This is awareness-level, system-design-adjacent content — not syntax or tuning — kept here because "why Postgres" and "Postgres vs. X" are common framing questions before a deeper SQL discussion starts.
+
+**Why it's reverred beyond "open source + JSON":**
+- **Governance.** Postgres has no owning company — a community project under a permissive BSD-style license, unlike MySQL (Oracle-owned) or Redis/Elastic/MongoDB/Terraform, all of which relicensed away from fully open-source once commercial pressure hit. For a long-horizon bet, that de-risking matters more than any single feature.
+- **Extensibility is the actual killer feature.** Designed since 1986 to let new types, operators, index methods and procedural languages be added without forking the engine. That is *why* it keeps absorbing categories: PostGIS (geospatial), pgvector (vector search), TimescaleDB (time-series), Citus (sharding), foreign data wrappers (query Mongo/S3/Oracle/CSV as if local), JSONB (document use cases), full-text search, and `LISTEN/NOTIFY` + `SKIP LOCKED` (simple queueing). "Just use Postgres" is a legitimate architecture: one system instead of five avoids dual writes, N backup/upgrade/on-call stories, and no cross-store joins.
+- **Correctness culture.** Real transactional DDL (`BEGIN; ALTER TABLE ...; ROLLBACK;` actually rolls back), strict typing and constraints taken seriously, no silent data mangling, and a strong distributed-correctness track record (Jepsen).
+- **A genuinely strong query engine.** MVCC (readers never block writers and vice versa), a sophisticated cost-based planner (CTEs, window functions, lateral joins, parallel execution), and an unusually wide index variety (B-tree, Hash, GIN for JSONB/arrays/FTS, GiST for geo/ranges, SP-GiST, BRIN for huge append-only tables), plus partial/expression/covering indexes.
+- **Ecosystem flywheel.** The permissive license made it the base for Aurora/RDS, AlloyDB, Azure Database for PostgreSQL, Supabase, Neon, CockroachDB and Yugabyte (wire-protocol compatible) — the Postgres wire protocol has become an industry lingua franca similar to S3's API.
+
+**Honest weaknesses:** one process per connection (needs PgBouncer at scale), vacuum/XID-wraparound operational burden, no built-in multi-master or automatic failover (bolt on Patroni), and logical replication is still maturing.
+
+**Postgres vs. MySQL — not a complete no-brainer.** Postgres wins on correctness/constraints, extensibility, query power, and richer native types. MySQL still wins on built-in replication/HA (Group Replication, InnoDB Cluster, more turnkey than "bolt on Patroni"), thread-per-connection handling thousands of connections without a pooler, no vacuum-style purge surprise, a clustered index on the primary key (faster PK range scans), simpler major-version upgrades, and proven extreme scale (Vitess sharding, PlanetScale). Rule of thumb: Postgres is the better **default**; MySQL is the better **specialist** for high-connection, high-write, simple-schema, heavily-sharded workloads — and the deciding factor is usually the team's existing operational experience, not the engine itself.
+
+**Postgres vs. NoSQL/specialist databases — "eating the market from below."** Postgres reaches "good enough for the 90th percentile of workloads" and the operational savings of one system then outweigh the marginal performance of a specialist (classic disruption from below). The rule for *when* it succeeds: it absorbs a category when the specialist's advantage was a **data model or index type** (its 1986 extensible architecture was built for exactly that); it does **not** absorb a category when the advantage is a **fundamentally different architecture**.
+
+| Specialist | Postgres answer | Verdict |
+|---|---|---|
+| Pinecone / Weaviate (vector) | `pgvector` | Mostly lost — default choice now; specialists survive only at billion-vector scale |
+| MongoDB | JSONB + GIN | Largely lost — little left the engine does better; Mongo's edge is now Atlas/DX, not the database |
+| Elasticsearch | FTS, GIN, `pg_trgm`, ParadeDB (`pg_search`/BM25) | Holding — Postgres FTS is genuinely production-sufficient when search is a *feature* (your app's own records, filterable by relational data like `tenant_id`); Elastic still wins when relevance tuning *is* the product, or for fuzzy/typo tolerance and log analytics at volume |
+| InfluxDB | TimescaleDB | Mostly lost |
+| Redis | `UNLOGGED`, `SKIP LOCKED`, `LISTEN/NOTIFY` | Surviving strongly — the latency class is physically different; Postgres is not a cache substitute |
+| Cassandra / DynamoDB | Citus, partitioning | Surviving — masterless, multi-region writes and linear horizontal scale are a different architecture |
+| Neo4j | Recursive CTEs | Holding — recursive CTEs cover real production work (org charts, permission trees, taxonomies, BOM, threaded comments) at typical depths; Neo4j earns its place for deep (5+ hop) traversal, graph algorithms, or when the graph *is* the domain, not merely "the data looks like a graph" |
+| Snowflake / BigQuery / ClickHouse (OLAP) | — | Safe — columnar storage and vectorized execution at petabyte scale is a different machine |
+| Kafka | — | Safe — log-centric streaming, replay and consumer groups are not a database problem |
+
+**Better heuristic than a feature checklist:** ask whether the specialist's capability is the *core of the product* or a *supporting feature*. Search as a feature → Postgres; search as the product → Elastic. Hierarchy as a feature → Postgres; graph as the product → Neo4j. The checklist always favors the specialist; the operational bill always favors consolidation.

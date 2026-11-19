@@ -377,6 +377,20 @@ Both require protected transport/storage and no token logging. Both require auth
 
 **Opaque example:** the issuer marks a reference inactive and the next uncached introspection observes that change. A 60-second cache can extend acceptance through that window. An introspection outage is not permission to authenticate successfully. Verify provider support rather than assuming every issuer offers opaque tokens and standard introspection.
 
+### Mental model and the phantom-token pattern
+
+**JWT is a passport:** the border agent (resource server) reads it and decides on the spot — fast, but a stolen passport keeps working until it expires. **Opaque is a coat-check ticket:** the number means nothing by itself; only the cloakroom (authorization server) knows what it maps to — instant invalidation, but every check means asking the cloakroom.
+
+Mature systems often avoid choosing one token type everywhere and instead combine both through the **phantom token pattern**:
+1. Issue **opaque** tokens to external/public clients — revocable, and leaks nothing if intercepted.
+2. The API gateway introspects the opaque token once and swaps it for a short-lived **JWT**.
+3. Internal services validate that JWT locally — stateless and fast on the inside, still revocable at the edge.
+
+**Gotchas worth keeping sharp:**
+- Refresh tokens should essentially always be opaque — they are long-lived and must be revocable.
+- ID tokens are always JWTs (OIDC requires it) and authenticate the *client*, not the API; they are not a substitute access token.
+- Reject `alg: none` and always validate `iss`, `aud`, `exp`, and `alg` explicitly — never trust the algorithm asserted inside the token header alone.
+
 [Spring JWT/opaque implementation comparison](Spring-Security-Interview-Notes.md#oauth-oidc-jwt-and-opaque-tokens-spring-integration).
 
 ## 9. Focused study plan: security decisions and defenses
