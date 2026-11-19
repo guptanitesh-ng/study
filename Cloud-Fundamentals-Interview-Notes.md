@@ -1,0 +1,220 @@
+# Cloud Fundamentals, Containers and CI/CD: Interview Notes
+
+Reviewed: November 19, 2026. Source: the seven-page Cloud Fundamentals PDF (hypervisors, VMs, containers, Docker internals, Kubernetes/AKS/EKS/GKE/OpenShift/PCF, PaaS comparisons), plus a prior session on AKS scaling/Helm/control-plane mechanics, folded in to cover the CI/CD + containerization gap this prep identified earlier. Observability (OpenTelemetry/Azure Monitor/App Insights) and Bicep/IaC sections were added later to close two further resume gaps the user chose to fold in here rather than spin out into separate files.
+
+**Context that shapes this file:** hands-on experience is strong on the application side (Spring Boot services deployed *onto* AKS/Kubernetes) but thin on owning the pipeline and cluster plumbing itself — build/push/deploy automation, Helm internals, autoscaling knobs. That's a normal division of labor (app teams vs. platform/DevOps teams), not a disqualifying gap — but it means this file leans deliberately toward the parts an app developer is expected to reason about in an interview (why a container, what a pipeline stage catches, how scaling decisions get made) rather than infra-team depth (cluster bring-up, networking, etcd internals).
+
+Related: [Spring Boot](Spring-Boot-Interview-Notes.md#7-boot-vs-cloud) (Spring Boot app packaged as the container these notes deploy), [Message Middleware](Message-Middleware-Interview-Notes.md) (queue/broker workloads that often run as KEDA-scaled K8s workers).
+
+## 1. Virtualization: hypervisors and VMs
+
+| Type | Runs on | Example | Trade-off |
+|---|---|---|---|
+| **Type 1 (bare-metal)** | Directly on hardware | VMware ESXi, Hyper-V, Xen | Lower overhead, used in data centers/cloud |
+| **Type 2 (hosted)** | On top of a host OS | VirtualBox, VMware Workstation | Simpler for a laptop/dev box, more overhead |
+
+A **VM** virtualizes hardware: each VM has its own full OS kernel, so isolation is strong but every VM pays the cost of booting and running a complete OS (minutes to start, GBs of disk/RAM overhead). Good for: running different OS kernels side by side, strong workload isolation, legacy apps that assume a dedicated machine.
+
+**Multi-cloud vs. hybrid cloud** — a distinction interviewers like to probe because people conflate them:
+- **Hybrid cloud** — one workload spans on-prem + cloud (or two clouds) as *one coordinated system*, usually for data residency, latency, or gradual migration (e.g., keep the DB on-prem, burst compute to Azure).
+- **Multi-cloud** — using more than one cloud provider for *different, independent* workloads or for redundancy/negotiating leverage — not necessarily integrated.
+
+## 2. Containers vs. VMs — the mechanism, not just the diagram
+
+A **container** doesn't virtualize hardware — it shares the host's kernel and uses OS-level isolation primitives:
+
+| Primitive | What it isolates |
+|---|---|
+| **Namespaces** (`PID`, `NET`, `MNT`, `UTS`, `IPC`, `USER`) | What a process can *see* — its own process tree, network stack, filesystem mounts, hostname, IPC objects, and user/group ID mapping |
+| **cgroups** (control groups) | What a process can *use* — CPU, memory, I/O, and process-count limits/accounting |
+| **Union filesystem** (OverlayFS) | Layers multiple read-only image layers plus one writable layer into a single merged view |
+
+Because there's no second kernel to boot, containers start in milliseconds/seconds and have near-zero overhead per instance — the trade-off is weaker isolation than a VM (a kernel-level exploit can cross container boundaries; a hypervisor escape is a much rarer class of bug). This is *why* production clusters often run containers **inside** VMs (an AKS node is a VM; pods are containers on it) — VM-level isolation at the node boundary, container-level density inside it.
+
+**OverlayFS copy-on-write, in one sentence:** a container's writable layer only ever contains the files it has changed; reads fall through to the read-only image layers underneath, so ten containers from the same image share the same underlying layers on disk and only pay storage for their own diffs.
+
+**Interview framing that lands better than "containers are lightweight VMs":** a container is a normal Linux process with restricted visibility and bounded resources, not a separate virtual machine — that's the reason for the startup-time and density difference, and it's also why "what happens on kernel panic" differs (one shared kernel crash takes down every container on that host, unlike VMs on a hypervisor).
+
+## 3. Docker fundamentals
+
+These terms rarely get asked as flashcard definitions — they show up as the vocabulary an interviewer expects you to use precisely while answering a "why did this build/deploy behave oddly" question, which is why the practical content right after this table matters more than the table itself:
+
+| Component | Role |
+|---|---|
+| **Docker Daemon** (`dockerd`) | Background service that builds, runs, and manages images/containers/networks/volumes |
+| **Docker Client** (`docker` CLI) | Talks to the daemon over a REST API (local socket or remote) |
+| **Docker Engine** | The daemon + API + CLI together |
+| **Image** | Immutable, layered filesystem + metadata (entrypoint, env, exposed ports) — the build artifact |
+| **Container** | A running (or stopped) instance of an image, with its own writable layer |
+| **Dockerfile** | Declarative build recipe — each instruction (`FROM`, `COPY`, `RUN`, `ENTRYPOINT`) creates a new image layer |
+| **Volume** | Storage that lives outside the container's writable layer, so data survives container removal/recreation |
+
+**Why layers matter beyond build speed:** Docker caches each Dockerfile instruction's layer; changing a line invalidates that layer *and every layer after it*. The classic interview-relevant mistake is `COPY . .` before `RUN npm install`/`mvn dependency:go-offline` — any source change busts the dependency-install layer too, so every build re-downloads the world. Fix: copy only the dependency manifest first, install, *then* copy the rest of the source.
+
+```dockerfile
+# Bad: any source change invalidates the dependency layer
+COPY . .
+RUN mvn dependency:go-offline
+
+# Better: dependency layer only invalidates when the manifest changes
+COPY pom.xml .
+RUN mvn dependency:go-offline
+COPY src ./src
+RUN mvn package
+```
+
+**Volumes vs. bind mounts vs. the container's own layer:**
+- **Container writable layer** — fast, but gone the moment the container is removed (`docker rm`). Fine for scratch/temp data only.
+- **Named volume** — Docker-managed storage, outlives the container, portable across container recreation — the right default for a DB's data directory.
+- **Bind mount** — maps a specific host path in; mainly a local-dev convenience (live-reload source code into a running container), not something you'd rely on in a cluster where the host filesystem isn't guaranteed to be the same machine next time.
+
+**Vagrant's role (why it still comes up):** Vagrant manages *VM* lifecycles (spin up/tear down a reproducible VM from a box image, often backed by VirtualBox) — it solves "give every developer an identical full-OS sandbox," a different problem from Docker's "package and run app processes with OS-level isolation." Teams that adopted containers largely replaced Vagrant for that use case, but Vagrant is still relevant when you genuinely need a different *kernel*/OS, not just an isolated process.
+
+## 4. CI/CD for a containerized app — the pipeline an interviewer expects you to reason about
+
+A typical pipeline for a Spring Boot (or any) service targeting AKS looks like:
+
+```
+commit/PR → build & unit test → build container image → push to registry
+         → deploy to non-prod (Helm/manifests) → integration/smoke tests
+         → promote to prod (often with approval gate) → post-deploy verification
+```
+
+| Stage | What it actually catches | Typical tool |
+|---|---|---|
+| **Build + unit test** | Compile errors, broken unit-level logic, before anything is packaged | Maven/Gradle + JUnit, GitHub Actions/Azure Pipelines |
+| **Static analysis / linting** | Code-quality and known-vulnerability patterns before merge | SonarQube, dependency-check |
+| **Image build** | Packages the tested artifact into a container image, tagged (commit SHA or semver, **not** `latest`) | `docker build`, Buildpacks |
+| **Image scan** | CVEs in the base image/dependencies — catches what unit tests can't | Trivy, Azure Defender for Containers |
+| **Push to registry** | Makes the exact tested artifact available to every environment | Azure Container Registry, ECR, Docker Hub |
+| **Deploy (non-prod)** | Runs `helm upgrade`/applies manifests against a real cluster namespace | Helm, Argo CD/Flux (GitOps), raw `kubectl` |
+| **Integration/smoke tests** | Does the deployed service actually come up and answer health checks — catches config/env issues unit tests never see | Post-deploy test job, synthetic probes |
+| **Promotion to prod** | Same already-tested image/tag moves forward — never a prod-only rebuild | Approval gate, progressive rollout |
+
+**The single idea that ties this together, and the one worth leading with in an interview:** *build the artifact once, promote the same artifact through every environment.* Rebuilding per environment reintroduces "works in staging, breaks in prod" because you're no longer testing what you'll actually ship — a different base-image patch version, a different dependency resolution, could sneak in between builds.
+
+**Deployment strategies — a question that always follows "how do you deploy":**
+
+| Strategy | Mechanism | Trade-off |
+|---|---|---|
+| **Rolling update** | K8s Deployment default — replaces old pods with new ones gradually | Simple, built-in, but a bad new version is serving traffic to *some* users during rollout |
+| **Blue/green** | Two full environments; switch traffic (often at the ingress/load-balancer) all at once | Instant rollback (flip back), but needs double the infra during the switch |
+| **Canary** | New version gets a small traffic slice (5–10%), monitored, then ramped | Limits blast radius of a bad release, but needs good metrics/alerting to actually catch the canary failing |
+
+**GitOps (Argo CD/Flux) vs. a push-based pipeline:** a traditional pipeline *pushes* `helm upgrade` from CI into the cluster; GitOps instead has a controller *inside* the cluster continuously reconciling against a Git repo's declared state — the pipeline's job becomes "update the Git repo," and the in-cluster controller does the actual apply. Benefit: the cluster's desired state is always auditable from Git history, and drift (someone ran `kubectl edit` by hand) gets silently reverted on the next reconcile instead of lingering unnoticed.
+
+**A scenario worth having ready:** *"Deployment succeeded in the pipeline but the new pods are crash-looping — what do you check?"* Pipeline "success" usually only means the image built/pushed and `kubectl apply`/`helm upgrade` was accepted by the API server — it does **not** mean the pods became healthy. Check (in order): `kubectl describe pod` for the failure reason (`CrashLoopBackOff`, `ImagePullBackOff`, `OOMKilled`), then pod logs for the actual exception, then whether a config/secret the app expects (env var, ConfigMap, connection string) exists in *this* environment/namespace — a very common real cause is an environment-specific config value missing or stale after promotion.
+
+## 5. Kubernetes/AKS ecosystem
+
+**AKS = managed control plane.** Microsoft/Azure runs the API server, scheduler, controller-manager, and `etcd`; you manage node pools, workloads, and configuration. This is why most app-team engineers never touch the control plane directly — Helm/`kubectl` talk *to* the control plane, they don't replace it.
+
+**Node ≈ VM.** An AKS node is normally an Azure VM (via a VM Scale Set) that joined the cluster; a node can run pods from many different applications (no default one-app-per-node boundary) unless you deliberately isolate with taints/tolerations + node selectors + a dedicated node pool. A node belongs to exactly one cluster — clusters never share worker nodes, even in the same subscription/VNet.
+
+**Two separate scaling layers — the distinction interviewers probe for:**
+
+| Layer | What it changes | Mechanism |
+|---|---|---|
+| Application | Pod replica count | **HPA** (CPU/memory/custom metric), **KEDA** (event-driven: queue depth, Kafka lag, cron — including scale-to-zero) |
+| Resource sizing per pod | CPU/memory *requests* on existing pods | **VPA** (often run in recommendation-only mode first) |
+| Infrastructure | Node count | **Cluster Autoscaler** (adds nodes when pods are unschedulable, removes underutilized ones), **Node Auto Provisioning** (also picks node *type*) |
+
+A reasonable baseline to state in an interview: HPA for synchronous API pods, KEDA for async queue/event workers, Cluster Autoscaler/NAP for nodes, VPA in recommendation mode for right-sizing — and never leave a fixed `replicaCount` actively reconciled by Helm on a Deployment that HPA also controls (they'll fight each other).
+
+**Helm's actual job:** renders chart templates into plain Kubernetes YAML and submits it to the API server — it is a packaging/templating tool, not a second control plane. It does not create the AKS cluster itself (that's Bicep/Terraform/ARM/`az aks create`); it deploys *into* an already-provisioned cluster.
+
+**Managed Kubernetes/PaaS comparison:**
+
+| Platform | What it manages for you | Positioning |
+|---|---|---|
+| **AKS** (Azure) | Control plane, Azure-native integration (AAD, Monitor, networking) | Standard K8s + Azure ecosystem glue |
+| **EKS** (AWS) | Control plane, AWS-native integration (IAM, VPC, CloudWatch) | Same idea, AWS ecosystem |
+| **GKE** (Google) | Control plane, often cited as the most "batteries-included" (Autopilot mode) | Same idea, GCP ecosystem |
+| **OpenShift** (Red Hat) | Control plane + opinionated add-ons (built-in CI/CD, routes, stricter security defaults) | Enterprise/on-prem-friendly K8s distribution |
+| **Pivotal/VMware Cloud Foundry (PCF)** | Entire deployment model — `cf push` an app, platform figures out containers/routing | Higher-level PaaS, less K8s-aware by design |
+
+**AKS vs. Azure Spring Apps:** AKS is general-purpose container orchestration — you own the Dockerfile, Helm chart, and scaling config, for any workload. Azure Spring Apps is a narrower, opinionated PaaS specifically for Spring Boot/Spring Cloud apps — push the jar, the platform handles the container, service discovery, and config server wiring for you, at the cost of control (you can't arbitrarily run non-Spring workloads or hand-tune the underlying pod spec).
+
+**OpenShift vs. Cloud Foundry:** OpenShift is Kubernetes with Red Hat's opinionated layer on top (you still think in pods/deployments, just with more guardrails and built-in tooling). Cloud Foundry/PCF abstracts away Kubernetes concepts almost entirely — you `cf push` a buildpack-detected app and never write a Deployment/Service yourself. The trade-off is the same shape as PaaS-vs-IaaS generally: CF is faster to a working deployment for a supported app shape, OpenShift/K8s gives more control when the workload doesn't fit CF's opinions.
+
+## 6. Observability: OpenTelemetry, Azure Monitor, Application Insights
+
+**The layer this sits at:** the pipeline/cluster sections above get a service *deployed and scaling*; observability is how you know it's actually *healthy* once it's there — and it's the resume-named tooling (Azure Monitor/App Insights/OpenTelemetry) most likely used behind a Spring Boot Actuator/auto-instrumentation layer rather than hand-wired, which is worth saying plainly before going into the mechanics.
+
+**The three pillars, and what each is actually good for:**
+
+| Pillar | Answers | Example |
+|---|---|---|
+| **Metrics** | "Is it healthy right now, in aggregate?" — numeric, cheap to store/alert on | Request rate, error rate, p95/p99 latency, JVM heap/GC pause time |
+| **Logs** | "What exactly happened for this one event?" — unstructured or structured detail | Exception stack trace, a specific request's processing steps |
+| **Traces** | "Where did the time go, across services, for this one request?" — causal chain | A request spanning Gateway → Service A → Service B → DB, each hop as a span |
+
+The trap in an interview is treating these as interchangeable: a metric tells you *that* p99 latency spiked at 14:32; it can't tell you *why* — that needs a trace (which service/span in the chain actually slowed down) and then a log (the specific error/condition inside that span).
+
+**OpenTelemetry (OTel) — why it exists:** before OTel, each vendor (Application Insights SDK, Jaeger client, Zipkin client, Datadog agent) had its own instrumentation API, so switching observability backends meant re-instrumenting the whole codebase. OTel is a **vendor-neutral instrumentation standard** — a common API/SDK for emitting metrics/logs/traces, plus the **OTel Collector**, a separate process that receives telemetry and exports it to *any* backend (Azure Monitor, Jaeger, Prometheus, Datadog) via configuration, not code changes. The practical payoff: instrument once, change your mind about the backend later without touching application code.
+
+**Where auto-instrumentation fits (the likely real-world shape of the experience):** Spring Boot + Micrometer (metrics facade) + Micrometer Tracing (bridges to OTel) + the Azure Monitor OpenTelemetry Distro/Java agent can auto-instrument HTTP calls, JDBC calls, and messaging calls with **zero application code changes** — attach a Java agent at startup, and spans/metrics for every inbound/outbound call appear automatically. This is almost certainly the "I've used App Insights/Azure Monitor" reality for most Spring Boot teams: the abstraction (agent + Actuator) does the instrumentation; the application code stays untouched unless a custom span/metric is needed for business-specific logic.
+
+**Trace context propagation — the mechanic that makes distributed tracing possible:** a single logical request gets one **trace ID**; each hop (service call) creates a child **span** with its own span ID and a reference to its parent span, and that context (trace ID + parent span ID) is carried across process boundaries in HTTP headers (the `traceparent` W3C Trace Context header is OTel's standard). Without propagating that header through every outbound call (including into a message broker's headers for async hops), the trace breaks into disconnected fragments per service instead of one coherent end-to-end view — a very common real bug when a service manually constructs an HTTP client without the auto-instrumented `RestTemplate`/`WebClient`/`HttpClient` bean.
+
+**Correlation ID vs. trace ID — a distinction worth having precise:** a trace ID is OTel/tracing-system-specific and spans the full multi-service call tree; a correlation ID is often a simpler, application-defined header (e.g., `X-Correlation-Id`) threaded through logs so a human can `grep` one customer-visible request across log files even without a full tracing backend. Many systems carry both — correlation ID for human log-searching, trace ID for the tracing backend's span graph — and they can even be the same value if deliberately wired that way.
+
+**The interview scenario to have ready:** *"p99 latency on an endpoint spiked for 10 minutes last night — walk me through how you'd find the cause."* Start at metrics/dashboards to confirm scope (one endpoint? one region? correlated with a deploy or a downstream outage?), then pull a trace for a slow request in that window to see which span/hop actually absorbed the time (app code vs. DB vs. a downstream call), then pull logs scoped to that trace ID/time window for the specific exception or slow-query detail — metrics narrow *when/where in aggregate*, tracing narrows *which hop*, logs give the *specific reason*.
+
+## 7. Infrastructure as Code: Bicep
+
+**What problem IaC solves, before the tool specifics:** without IaC, "what does our infrastructure actually look like" lives in whoever clicked through the Azure Portal last, with no history, no review, and no repeatable way to stand up a second environment identically. IaC makes infrastructure a versioned, reviewable artifact (a file in the same repo/PR workflow as application code), and the deployment tool reconciles the *declared* state against *actual* Azure resources rather than you running imperative scripts.
+
+**Bicep vs. ARM templates vs. Terraform — the question that actually gets asked:**
+
+| Tool | Format | Scope | Positioning |
+|---|---|---|---|
+| **ARM templates** | Raw JSON | Azure only | Verbose, hard to hand-author; Bicep compiles down to this |
+| **Bicep** | Declarative DSL (not JSON) | Azure only | Azure-native, first-party Microsoft tooling, simpler syntax than ARM, no state file to manage (Azure itself is the source of truth) |
+| **Terraform** | HCL | Multi-cloud (Azure, AWS, GCP, etc.) | The standard choice when infra spans multiple clouds or the team wants one tool everywhere; needs an externally-managed state file |
+
+The practical trade-off to state plainly: Bicep is the better fit for an Azure-only shop wanting the least friction with first-party tooling (`az deployment group create`, deep Azure Resource Manager integration, automatic "what-if" diff preview); Terraform wins once more than one cloud is in play, or an org already has Terraform expertise/tooling (CI modules, state backends) it doesn't want to duplicate for one more DSL.
+
+**Idempotency and "what-if" — the core IaC guarantee to be able to explain:** re-running the same Bicep deployment against infrastructure that already matches the template is a no-op (ARM computes a diff and only changes what actually differs) — this is what makes it safe to run deployments repeatedly/in CI rather than only once by hand. `az deployment group create --what-if` previews exactly that diff (create/modify/delete per resource) *before* applying it — the IaC equivalent of a dry-run, and the answer to "how do you avoid an unreviewed destructive change sneaking into a pipeline."
+
+**Modules and parameters — how a real Bicep setup avoids copy-pasted templates per environment:** a `module` block lets one Bicep file reference another (e.g., a reusable "App Service + App Insights" module), and `@description()`-documented `param`s (environment name, SKU size, region) let the same module be deployed differently per environment (dev/test/prod) from one set of files plus environment-specific parameter files — the IaC analogue of "build once, promote the same artifact" from the CI/CD section above, applied to infrastructure instead of application binaries.
+
+**A realistic interview framing given likely exposure:** if Bicep usage has mostly been consuming/tweaking existing templates (adding a parameter, adjusting a SKU) rather than authoring a module hierarchy from scratch, say that directly, then pivot to the concepts above (what-if, idempotent reconciliation, module reuse for multi-environment consistency) — those are the parts that demonstrate understanding *why* IaC is structured the way it is, independent of how much hands-on authoring has happened.
+
+## 8. Interview questions with answers and scenarios
+
+### 8.1 Why containerize an app that already runs fine as a VM-deployed JAR?
+
+Containers share the host kernel instead of booting their own, so they start in seconds instead of minutes and pack far more instances per host. More importantly for CI/CD: the image is the *exact* tested artifact — same layers, same dependency versions — promoted unchanged from dev through prod, which a VM-image-per-environment workflow rarely guarantees as cleanly.
+
+### 8.2 What's the actual isolation mechanism behind a container, and where is it weaker than a VM?
+
+Linux namespaces (process tree, network, mounts, hostname, IPC, user IDs) control what a process can *see*; cgroups control what it can *use* (CPU/memory/IO limits). There's no second kernel — every container on a host shares one kernel, so a kernel-level exploit can cross container boundaries in a way a hypervisor escape (VM-to-VM) does not. That's also why Kubernetes nodes are themselves VMs — VM isolation at the node boundary, container density inside it.
+
+### 8.3 Pipeline says deploy succeeded, but the service is down — what's the gap?
+
+Pipeline success usually just means the image built, pushed, and `helm upgrade`/`kubectl apply` was *accepted* by the API server — accepted, not healthy. Check `kubectl describe pod` for the actual state (`CrashLoopBackOff`/`ImagePullBackOff`/`OOMKilled`), then logs for the real exception, then whether an environment-specific ConfigMap/secret/connection string the app expects actually exists in that namespace — missing or stale environment config after a promotion is the most common real-world cause.
+
+### 8.4 Why "build once, promote the same artifact" instead of rebuilding per environment?
+
+Rebuilding per environment risks a different base-image patch, dependency resolution, or build-time flag sneaking in between the staging build and the prod build — exactly the "works in staging, breaks in prod" failure mode a pipeline exists to prevent. Tagging by commit SHA (not `latest`) and pushing that one image through every environment keeps what you tested and what you ship identical.
+
+### 8.5 CPU is low but pods aren't scaling for a queue-backed worker — what's wrong with the setup?
+
+Likely HPA was configured on CPU/memory for a workload whose actual load signal is queue depth/consumer lag, not CPU. HPA only reacts to the metrics it's told to watch; an async worker needs KEDA (Service Bus/Kafka/queue-depth triggers, including scale-to-zero when idle), not a CPU-based HPA, because the pod can be CPU-idle while messages pile up waiting to be picked up.
+
+### 8.6 Rolling update vs. blue/green vs. canary — how do you choose?
+
+Rolling (K8s default) is simplest but exposes some live traffic to a bad new version during the rollout. Blue/green gives an instant, full rollback by flipping traffic back, at the cost of running double infrastructure during the switch. Canary limits blast radius by sending a small traffic slice to the new version first, but only works if you have real-time metrics/alerting wired up to actually detect the canary failing — otherwise you've just added rollout complexity without the safety net it's meant to buy.
+
+### 8.7 Why doesn't the app team usually touch the AKS control plane directly?
+
+AKS is a managed service — Azure runs and patches the API server, scheduler, controller-manager, and `etcd`. The app team interacts with it *indirectly* through every `kubectl`/Helm command (which talks to the API server), but the operational burden of running those control-plane components — upgrades, backups, HA — sits with Azure, not the app team. That's the entire value proposition of "managed Kubernetes" versus self-hosting a cluster.
+
+### 8.8 A trace shows a request spent 4 of its 5 total seconds inside one downstream span — what do you do next, and what if there's no trace at all?
+
+With a trace, go straight to that span's service and pull logs scoped to its trace ID for the same time window — that narrows a vague "it's slow" report to one specific hop and one specific log stream, instead of guessing across every service in the call chain. Without tracing in place (no OTel instrumentation configured, or the header wasn't propagated through a manual HTTP client), you're reduced to correlating timestamps across each service's independent logs by hand — which is exactly the pain tracing exists to remove, and worth naming directly as the gap if asked "how would you debug this without a tracing backend."
+
+### 8.9 A Bicep deployment's `what-if` output shows a resource being deleted that you didn't expect — what does that usually mean, and how do you avoid it reaching prod?
+
+Most often it means the template's declared state no longer includes a resource that exists in Azure — someone (or a prior deployment) created it out-of-band, or a parameter/condition changed and silently dropped a resource block, and Bicep's reconciliation treats "not in the template" as "should not exist." The guard is exactly what `what-if` is for: run it as a required, reviewed gate in the pipeline *before* `deployment group create` applies anything, so an unexpected delete is caught in a PR/approval step rather than discovered after the resource is gone.

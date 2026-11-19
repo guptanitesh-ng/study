@@ -8,7 +8,7 @@ Related: [Spring Boot](Spring-Boot-Interview-Notes.md) (where `@JmsListener`/`@K
 
 ## 1. JMS fundamentals, kept — these still get asked
 
-**Message anatomy:** headers (`JMSDestination`, `JMSDeliveryMode`, `JMSMessageID`, `JMSTimestamp`, `JMSCorrelationID`, `JMSReplyTo`, `JMSRedelivered`), properties (app-defined, used by selectors), and body (`TextMessage`, `ObjectMessage`, `BytesMessage`, `MapMessage`, `StreamMessage`).
+**Message anatomy** — this gets asked as "how would you debug a message that silently vanished / got processed twice," not as a trivia recitation: headers (`JMSDestination`, `JMSDeliveryMode`, `JMSMessageID`, `JMSTimestamp`, `JMSCorrelationID`, `JMSReplyTo`, `JMSRedelivered`), properties (app-defined, used by selectors), and body (`TextMessage`, `ObjectMessage`, `BytesMessage`, `MapMessage`, `StreamMessage`). The one header that actually earns its keep in production debugging is `JMSRedelivered` — if it's `true` on a message you're investigating, you immediately know the first attempt failed somewhere downstream (exception, timeout, crash) rather than the message being malformed from the start; that's the first thing to check before digging into business logic.
 
 **Acknowledgment modes** — the detail most Kafka-only candidates have never had to reason about:
 
@@ -42,10 +42,12 @@ Related: [Spring Boot](Spring-Boot-Interview-Notes.md) (where `@JmsListener`/`@K
 
 ## 2. ActiveMQ virtual topics vs. composite destinations
 
-- **Virtual topic:** producer sends once to a topic; ActiveMQ fans it out to per-consumer backing queues (`Consumer.A.VirtualTopic.Foo`, `Consumer.B.VirtualTopic.Foo`, ...) automatically as consumers subscribe — dynamic, broker-managed fan-out, each consumer gets queue semantics (durable, competing-consumer-safe) without a durable topic subscription.
-- **Composite destination:** producer is configured to send to a *static*, pre-declared list of destinations in one send call — fan-out is fixed at config time, not driven by who's currently subscribed.
+This is the kind of detail a vendor-agnostic Kafka-only candidate can't answer, so it's worth having ready as a "here's something specific I've actually operated" moment — the scenario that surfaces it in an interview is "a new consumer team needs a copy of every order event, how do you add them without touching the producer or redeploying anything":
 
-The practical difference: virtual topics scale with consumers joining/leaving at runtime; composite destinations are simpler but require a config change to add a new fan-out target.
+- **Virtual topic:** producer sends once to a topic; ActiveMQ fans it out to per-consumer backing queues (`Consumer.A.VirtualTopic.Foo`, `Consumer.B.VirtualTopic.Foo`, ...) automatically as consumers subscribe — dynamic, broker-managed fan-out, each consumer gets queue semantics (durable, competing-consumer-safe) without a durable topic subscription. Answer to the scenario above: the new team just starts a consumer on `Consumer.NewTeam.VirtualTopic.Orders` — zero producer-side change.
+- **Composite destination:** producer is configured to send to a *static*, pre-declared list of destinations in one send call — fan-out is fixed at config time, not driven by who's currently subscribed. Same scenario here means editing the producer's destination config and redeploying it — the trade-off an interviewer is really probing for.
+
+The practical difference: virtual topics scale with consumers joining/leaving at runtime; composite destinations are simpler to reason about but require a config change (and often a redeploy) to add a new fan-out target.
 
 ## 3. The JMS -> Kafka bridge — concept by concept
 

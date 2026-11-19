@@ -4,7 +4,12 @@
     {
       "path": "Security-Interview-Notes.md",
       "title": "Application Security: Practical Interview Notes",
-      "bytes": 118306
+      "bytes": 119584
+    },
+    {
+      "path": "Cosmos-DB-Interview-Notes.md",
+      "title": "Azure Cosmos DB: Interview Notes",
+      "bytes": 12217
     },
     {
       "path": "Caching-Interview-Notes.md",
@@ -12,9 +17,19 @@
       "bytes": 13537
     },
     {
+      "path": "Cloud-Fundamentals-Interview-Notes.md",
+      "title": "Cloud Fundamentals, Containers and CI/CD: Interview Notes",
+      "bytes": 28552
+    },
+    {
       "path": "Java-Core-Interview-Notes.md",
       "title": "Core Java: Practical Interview Notes through Java 21",
       "bytes": 110213
+    },
+    {
+      "path": "Elasticsearch-Interview-Notes.md",
+      "title": "Elasticsearch: Core Concepts, Mapping, Search Internals, and Tuning",
+      "bytes": 17625
     },
     {
       "path": "Java-8-Lambdas-Streams-Optional.md",
@@ -44,7 +59,7 @@
     {
       "path": "Message-Middleware-Interview-Notes.md",
       "title": "Message Middleware: JMS, MDBs and the Kafka Gap",
-      "bytes": 11560
+      "bytes": 15744
     },
     {
       "path": "Spring-Boot-Interview-Notes.md",
@@ -74,7 +89,7 @@
     {
       "path": "SQL-Interview-Notes.md",
       "title": "SQL: Interview Notes",
-      "bytes": 16657
+      "bytes": 22473
     }
   ]
 }
