@@ -1,10 +1,10 @@
-# Cloud Fundamentals, Containers and CI/CD: Interview Notes
+# Cloud Fundamentals, Containers and CI/CD Notes
 
 Reviewed: November 19, 2026. Source: the seven-page Cloud Fundamentals PDF (hypervisors, VMs, containers, Docker internals, Kubernetes/AKS/EKS/GKE/OpenShift/PCF, PaaS comparisons), plus a prior session on AKS scaling/Helm/control-plane mechanics, folded in to cover the CI/CD + containerization gap this prep identified earlier. Observability (OpenTelemetry/Azure Monitor/App Insights) and Bicep/IaC sections were added later to close two further resume gaps the user chose to fold in here rather than spin out into separate files.
 
 **Context that shapes this file:** hands-on experience is strong on the application side (Spring Boot services deployed *onto* AKS/Kubernetes) but thin on owning the pipeline and cluster plumbing itself — build/push/deploy automation, Helm internals, autoscaling knobs. That's a normal division of labor (app teams vs. platform/DevOps teams), not a disqualifying gap — but it means this file leans deliberately toward the parts an app developer is expected to reason about in an interview (why a container, what a pipeline stage catches, how scaling decisions get made) rather than infra-team depth (cluster bring-up, networking, etcd internals).
 
-Related: [Spring Boot](Spring-Boot-Interview-Notes.md#7-boot-vs-cloud) (Spring Boot app packaged as the container these notes deploy), [Message Middleware](Message-Middleware-Interview-Notes.md) (queue/broker workloads that often run as KEDA-scaled K8s workers).
+Related: [Spring Boot](../spring/Spring-Boot-Notes.md#7-boot-vs-cloud) (Spring Boot app packaged as the container these notes deploy), [Message Middleware](Message-Middleware-Notes.md) (queue/broker workloads that often run as KEDA-scaled K8s workers).
 
 ## 1. Virtualization: hypervisors and VMs
 

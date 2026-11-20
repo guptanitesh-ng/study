@@ -1,4 +1,4 @@
-# Core Java: Practical Interview Notes through Java 21
+# Core Java: Practical Notes through Java 21
 
 **Companion guides:** [Exceptions, Generics, I/O and Serialization](Java-Exceptions-Generics-IO-Serialization.md) contains the detailed material moved from sections 9, 13, 15 and 16, plus an expanded generics guide incorporating the supplied PDF. [Java 8: Lambdas, Streams, Optional and Date/Time](Java-8-Lambdas-Streams-Optional.md) contains the detailed material moved from section 14 and the Java 8 date/time subsection of section 11, consolidated with a second supplied PDF. [Java Multithreading and Concurrency](Java-Multithreading-Concurrency.md) contains the detailed material moved from sections 19 and 20, consolidated with three supplied PDFs. [Java Collections and Data Structures](Java-Collections-DataStructures.md) contains the detailed material moved from section 10, consolidated with a fourth supplied PDF. The original section numbers for all moved material are preserved below rather than scattered as pointers through the rest of this document.
 

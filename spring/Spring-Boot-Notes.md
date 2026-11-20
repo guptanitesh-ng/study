@@ -1,10 +1,10 @@
-# Spring Boot: Interview Notes
+# Spring Boot Notes
 
 Reviewed: October 31, 2026. Source: the four-page Spring Boot PDF, dated September 23, 2020, with later Spring Cloud material.
 
 This is an editorial Markdown conversion, not a verbatim transcript: original topics are retained in condensed form, outdated claims are corrected, and additions are identified. Screenshots/diagrams are not reproduced; text references to them are not a substitute for inspecting the PDF. Priorities below are study recommendations, not predictions of a particular interview.
 
-Study sequence: [Core](Spring-Core-Interview-Notes.md) -> **Boot** -> [REST + MVC](Spring-REST-MVC-Interview-Notes.md) -> [Data](Spring-Data-Interview-Notes.md) -> [Security](Spring-Security-Interview-Notes.md).
+Study sequence: [Core](Spring-Core-Notes.md) -> **Boot** -> [REST + MVC](Spring-REST-MVC-Notes.md) -> [Data](Spring-Data-Notes.md) -> [Security](Spring-Security-Notes.md).
 
 ## How to learn from these examples
 
@@ -78,7 +78,7 @@ In `AppConfig`, `@EnableConfigurationProperties` registers `DairyProperties` and
 
 This is **your explicit factory logic**, not Boot auto-configuration and not `@ConditionalOnProperty`. Configuration being present does not prove credentials are valid or a remote request will succeed. The missing-configuration fallback is not evidence of a general fallback for every later LLM failure.
 
-`OrderPipeline` asks for the interface `IntentExtractor`. The `@Primary` factory bean is the preferred candidate for that injection point; the separately scanned regex component is also injected by its concrete type for comparison. See the [Core guide](Spring-Core-Interview-Notes.md) for the general explanations of dependency resolution and bean scopes.
+`OrderPipeline` asks for the interface `IntentExtractor`. The `@Primary` factory bean is the preferred candidate for that injection point; the separately scanned regex component is also injected by its concrete type for comparison. See the [Core guide](Spring-Core-Notes.md) for the general explanations of dependency resolution and bean scopes.
 
 These settings are bound at startup. Editing a configuration file after the context starts does not automatically rebuild the extractor.
 
@@ -841,7 +841,7 @@ Always match the Cloud release train to the Boot generation.
 
 **Answer:** an executable JAR contains Java application/dependency artifacts and needs a JVM; a container image packages a process environment; a native image compiles an executable for a target platform.
 
-A container can run either a JVM JAR or a native executable. Native builds need Spring AOT-compatible configuration and reachability metadata; they are not simply smaller JARs. See [Core's AOT explanation](Spring-Core-Interview-Notes.md#1010-what-changes-with-aotnative-image-constraints).
+A container can run either a JVM JAR or a native executable. Native builds need Spring AOT-compatible configuration and reachability metadata; they are not simply smaller JARs. See [Core's AOT explanation](Spring-Core-Notes.md#1010-what-changes-with-aotnative-image-constraints).
 
 ### 9.21 What should you investigate during Boot 3-to-4 migration?
 

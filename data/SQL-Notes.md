@@ -1,10 +1,10 @@
-# SQL: Interview Notes
+# SQL Notes
 
-Reviewed: November 18, 2026. Source: a personal notes document (`SQL Basics.pdf`), Oracle/PL-SQL flavored, covering joins, keys, indexing, cursors, stored procedures/functions, packages, triggers and query-tuning checklists. A second personal document (`DB.pdf`) on concurrency control, isolation levels and ACID contributed the indexing cross-reference below and was otherwise folded into [JPA-ORM-Core-Interview-Notes.md §7](JPA-ORM-Core-Interview-Notes.md#7-locking-optimistic-and-pessimistic) and [§9](JPA-ORM-Core-Interview-Notes.md#9-transactions-the-ejb-way-jta-2pcxa-persistence-context-scope), since that content is really about transaction/locking semantics, not SQL syntax.
+Reviewed: November 18, 2026. Source: a personal notes document (`SQL Basics.pdf`), Oracle/PL-SQL flavored, covering joins, keys, indexing, cursors, stored procedures/functions, packages, triggers and query-tuning checklists. A second personal document (`DB.pdf`) on concurrency control, isolation levels and ACID contributed the indexing cross-reference below and was otherwise folded into [JPA-ORM-Core-Notes.md §7](JPA-ORM-Core-Notes.md#7-locking-optimistic-and-pessimistic) and [§9](JPA-ORM-Core-Notes.md#9-transactions-the-ejb-way-jta-2pcxa-persistence-context-scope), since that content is really about transaction/locking semantics, not SQL syntax.
 
 You've said you're a backend developer, not primarily a DBA, so this file stays at the level interviewers actually probe backend candidates on: reading an execution plan well enough to explain *why* a query is slow, knowing which query shapes defeat an index, and the PL/SQL building blocks (cursors, procedures, triggers) well enough to discuss trade-offs — not writing production PL/SQL packages from scratch. Where Oracle-specific syntax is shown, the general concept (not the dialect) is what interviewers are grading.
 
-Companion guides: [JPA/ORM Core](JPA-ORM-Core-Interview-Notes.md), [Spring Data](Spring-Data-Interview-Notes.md).
+Companion guides: [JPA/ORM Core](JPA-ORM-Core-Notes.md), [Spring Data](../spring/Spring-Data-Notes.md).
 
 ## Contents
 

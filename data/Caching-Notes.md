@@ -1,10 +1,10 @@
-# Caching and Redis: Interview Notes
+# Caching and Redis Notes
 
 Reviewed: November 19, 2026. Source: the five-page Caching PDF, covering in-process vs. distributed caching, Redis data types, Spring Cache abstraction, and Redis internals (replication, Sentinel, Cluster, persistence, eviction).
 
 This is a scoped editorial conversion, not a verbatim transcript. In real Spring Boot teams, Redis is almost always consumed behind an abstraction — Spring Cache annotations or Spring Data Redis — not operated directly. Deep Redis Cluster/Sentinel topology internals are trimmed to brief awareness notes; app-level caching decisions get full depth since those are what you actually design and defend in an interview.
 
-Related: [Spring Data](Spring-Data-Interview-Notes.md) (transactions, repositories), [Boot vs. Cloud](Spring-Boot-Interview-Notes.md#7-boot-vs-cloud) (where a dedicated cache/service mesh fits a microservice stack).
+Related: [Spring Data](../spring/Spring-Data-Notes.md) (transactions, repositories), [Boot vs. Cloud](../spring/Spring-Boot-Notes.md#7-boot-vs-cloud) (where a dedicated cache/service mesh fits a microservice stack).
 
 ## 1. In-process vs. distributed cache
 

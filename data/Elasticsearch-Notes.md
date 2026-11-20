@@ -4,7 +4,7 @@ Source: personal Elasticsearch notes covering core concepts, Java client evoluti
 
 **Context that shapes this file:** typical usage pattern is Elasticsearch consumed *behind an abstraction* (a search service / repository layer sitting on top of the client), so day-to-day coding rarely touches raw query DSL or client internals directly. That's a normal, defensible production pattern — but interviewers probe underneath the abstraction precisely because that's where the real understanding (or the gap) shows up. This file is organized to go from "what the abstraction hides" outward: core concepts first, then the client layer, then mapping/indexing, then search internals, then the modeling problems and tuning knobs that actually come up when someone asks "why is this slow" or "how would you model X."
 
-Related: [Spring Boot](Spring-Boot-Interview-Notes.md) (Spring Data Elasticsearch repositories are exactly the abstraction layer referenced above), [SQL](SQL-Interview-Notes.md) (indexing/query-plan parallels — ES's inverted index vs. a B-tree index is a recurring comparison interviewers like).
+Related: [Spring Boot](../spring/Spring-Boot-Notes.md) (Spring Data Elasticsearch repositories are exactly the abstraction layer referenced above), [SQL](SQL-Notes.md) (indexing/query-plan parallels — ES's inverted index vs. a B-tree index is a recurring comparison interviewers like).
 
 ## 1. Core concepts — the vocabulary underneath the abstraction
 

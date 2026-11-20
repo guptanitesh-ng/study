@@ -1,6 +1,6 @@
-# Application Security: Practical Interview Notes
+# Application Security: Practical Notes
 
-This is the primary security-preparation guide: framework-neutral authentication patterns, practical browser and API scenarios, credential handling, transport/data protection, and operational recovery. Start with the [scenario-led study plan](#9-focused-study-plan-security-decisions-and-defenses), then explore the relevant topic. Explain why the problem occurs, where the control belongs and how to verify it. Use [Spring Security: Interview Notes, section 8](Spring-Security-Interview-Notes.md#8-spring-integration-map) only for implementation mappings.
+This is the primary security-preparation guide: framework-neutral authentication patterns, practical browser and API scenarios, credential handling, transport/data protection, and operational recovery. Start with the [scenario-led study plan](#9-focused-study-plan-security-decisions-and-defenses), then explore the relevant topic. Explain why the problem occurs, where the control belongs and how to verify it. Use [Spring Security: Interview Notes, section 8](../spring/Spring-Security-Notes.md#8-spring-integration-map) only for implementation mappings.
 
 The examples are conceptual flows, not deployed applications or claims of production experience.
 
@@ -69,7 +69,7 @@ With multiple pods, choose shared session storage or a deliberate routing/sessio
 
 Pin signing to a key version, map it to the JWT's `kid`, and coordinate rotation with validators: publish the new public key before using it, then retain the old public key until legitimate old tokens expire. A compromised key requires emergency removal of trust, including cached verifier keys, rather than normal overlap. Key Vault does not prevent an already compromised issuer from abusing its signing permission. Clearing a browser token is not server-side revocation, and cookie-carried JWT authentication still needs appropriate CSRF protection.
 
-[Spring implementation: section 8.2](Spring-Security-Interview-Notes.md#82-pattern-a-application-owned-login-and-server-session).
+[Spring implementation: section 8.2](../spring/Spring-Security-Notes.md#82-pattern-a-application-owned-login-and-server-session).
 
 ## 3. Pattern B: external OIDC login with a backend session
 
@@ -176,7 +176,7 @@ The browser sends the provider cookie **to the provider**, not to the app. If th
 
 **Limits and verification:** provider logout does not automatically end every other application's existing session or revoke every issued access token; those require explicit supported logout/revocation mechanisms. Immediately after local logout, send a protected request using the former session ID **before starting another login flow**: it must no longer grant session-authenticated access. Then trace the new authorization redirect and callback. If they establish a new session, immediate sign-in is SSO working; if the old invalidated session still grants access, investigate logout enforcement.
 
-[Spring implementation: section 8.3](Spring-Security-Interview-Notes.md#83-pattern-b-enterprise-oidc-login-with-a-backend-session).
+[Spring implementation: section 8.3](../spring/Spring-Security-Notes.md#83-pattern-b-enterprise-oidc-login-with-a-backend-session).
 
 ## 4. Pattern C: SPA obtains a token and calls the resource server
 
@@ -255,7 +255,7 @@ After signature verification, validate expected issuer, intended API audience, t
 | "The login screen says success, but GET /orders returns 401; an admin action returns 403. How do you distinguish them?" | For 401, inspect token acceptance: intended API audience, issuer, signature, time and key availability. For 403, inspect mapped permissions and resource rules. A key-fetch outage can appear as 401 in some implementations, so server diagnostics must distinguish unavailable verification from bad credentials without exposing tokens. |
 | "Suppose the API caches JWKS for five minutes, while a token expires in one hour. Which lifetime applies?" | Both, to different things. The key-cache policy controls reuse and refresh of public verification keys; the token's expiry controls credential validity. Every request still checks its token, and refreshing keys does not check whether the user logged out. |
 
-[Spring implementation: section 8.4](Spring-Security-Interview-Notes.md#84-pattern-c-spa-obtains-a-token-and-calls-the-resource-server).
+[Spring implementation: section 8.4](../spring/Spring-Security-Notes.md#84-pattern-c-spa-obtains-a-token-and-calls-the-resource-server).
 
 ## 5. Pattern D: service-to-service client credentials
 
@@ -288,7 +288,7 @@ Provision least-privilege application permissions. Use supported workload/federa
 | "A worker processes a thousand jobs. Should it request a token for each job?" | Usually no; reuse a protected cached token until renewal is needed. Coordinate renewal to avoid a request burst, and bound retries during provider outages. Client-credentials flows normally obtain a new token by authenticating again, not through a user refresh token. |
 | "Both services run in the same private cluster. Can B skip token validation?" | No; network location does not establish the calling application or its rights. Validate identity and audience and enforce least privilege; private routing is an additional barrier, not a replacement. |
 
-[Spring implementation: section 8.5](Spring-Security-Interview-Notes.md#85-pattern-d-service-to-service-client-credentials).
+[Spring implementation: section 8.5](../spring/Spring-Security-Notes.md#85-pattern-d-service-to-service-client-credentials).
 
 ### Managed identity: a practical Pattern D example
 
@@ -391,7 +391,7 @@ Mature systems often avoid choosing one token type everywhere and instead combin
 - ID tokens are always JWTs (OIDC requires it) and authenticate the *client*, not the API; they are not a substitute access token.
 - Reject `alg: none` and always validate `iss`, `aud`, `exp`, and `alg` explicitly — never trust the algorithm asserted inside the token header alone.
 
-[Spring JWT/opaque implementation comparison](Spring-Security-Interview-Notes.md#oauth-oidc-jwt-and-opaque-tokens-spring-integration).
+[Spring JWT/opaque implementation comparison](../spring/Spring-Security-Notes.md#oauth-oidc-jwt-and-opaque-tokens-spring-integration).
 
 ## 9. Focused study plan: security decisions and defenses
 
@@ -1234,6 +1234,90 @@ flowchart TD
 
 **Verify:** restore synthetic representative data in an isolated environment, including required uploads, schema and key versions. Measure data-loss and recovery-time outcomes; test that the production workload identity cannot delete protected recovery copies. Reconcile queues/external side effects so recovery does not blindly duplicate orders or payments.
 
+## 16. Operational access and log hygiene: OAuth grant selection, jump hosts, SSH keys, redaction
+
+Sections 1-6 cover the pattern-level question — which actor authenticates, which credential crosses which boundary. This section covers three narrower, frequently-asked operational questions that sit below that: which OAuth **grant** fits a given client, how a human reaches a locked-down network to run one-off admin work, and how to keep sensitive fields out of logs once the system is live.
+
+### 16.1 Choosing an OAuth 2.0 grant type
+
+| Grant | Who holds the credential | Typical fit | Key risk if misused |
+| --- | --- | --- | --- |
+| Authorization Code (+ PKCE) | Backend holds client secret; browser never sees it | Server-side web apps; "sign in with Google/GitHub" | None if PKCE/state are enforced; still the default choice |
+| Implicit | None — access token returned directly via redirect | Legacy SPA pattern, effectively superseded by Authorization Code + PKCE | Token exposed in browser history/referrer; no refresh token |
+| Resource Owner Password Credentials (ROPC) | Client app collects the user's raw username/password | First-party, highly trusted native/desktop clients only | App sees the user's actual password; defeats the purpose of delegated auth if misused for third-party clients |
+| Client Credentials | The service itself (client_id + client_secret) | Machine-to-machine; no end user involved | Nothing to delegate — compromise of the secret is a full service-identity compromise |
+
+**Why Implicit and ROPC are mostly historical:** Implicit returns the access token directly in a URL fragment, so it is routinely logged by browser history, proxies and referrer headers, and has no refresh token to allow short lifetimes without re-login friction. ROPC requires the client to handle the raw password, which only makes sense for an application the user already fully trusts (e.g. the OS). Modern guidance (OAuth 2.0 Security BCP) steers almost everything that used to pick Implicit toward Authorization Code + PKCE instead — see [section 6](#6-oauth-oidc-jwt-and-opaque-tokens-different-layers) and [PKCE](https://www.rfc-editor.org/rfc/rfc7636) for why PKCE closes the code-interception gap for public clients.
+
+| Interviewer follow-up | Practical answer cue |
+| --- | --- |
+| "Our mobile app can't keep a client secret. Which grant?" | Authorization Code with PKCE — PKCE replaces the client secret with a per-request verifier/challenge pair, so a public client stays safe without storing a shared secret. |
+| "A nightly batch job needs to call an internal API with no user present. Which grant?" | Client Credentials — there is no resource owner to delegate from; the service authenticates as itself. |
+| "Why not just use ROPC since we own both the app and the API?" | Owning both doesn't remove the risk that the password-handling code path becomes an attack target, and it blocks adopting external identity providers or MFA later. Prefer Authorization Code even for first-party apps unless there's a concrete constraint (e.g. no browser context at all). |
+
+### 16.2 Jump servers and bastion hosts: reaching a locked-down network
+
+```mermaid
+flowchart LR
+    Admin["Administrator (trusted network)"] -->|SSH| Jump["Jump server / bastion host"]
+    Jump -->|SSH| Target["Internal host in private subnet / DMZ"]
+    Internet(("Untrusted internet")) -.blocked direct access.-> Target
+```
+
+A **jump server (jump host)** is a hardened, monitored system placed between two dissimilar security zones (e.g. a trusted corporate network and a private subnet) purely to broker access — administrators hop through it rather than reaching internal hosts directly. A **bastion host** is the same idea viewed from the other direction: a purpose-built, hardened machine sitting on the *outside* edge of a firewall or inside a DMZ, typically running a single exposed service (proxy, load balancer) with everything else stripped out, because it is the one box directly reachable from an untrusted network.
+
+| Interviewer follow-up | Practical answer cue |
+| --- | --- |
+| "What does the jump server actually protect against?" | It collapses "who can reach internal hosts" to one audited, hardened chokepoint, instead of every internal host needing its own internet-facing exposure and patch/monitoring discipline. |
+| "If the jump server is compromised, what's the blast radius?" | Everything reachable from it — which is exactly why it must be the most tightly monitored, minimally-installed, frequently-patched host in the estate, with short-lived credentials/MFA rather than static shared logins. |
+| "Bastion vs. jump server — same thing?" | Overlapping in practice; "bastion" emphasizes a hardened single-purpose edge host (reduced attack surface by design), "jump server" emphasizes the access-brokering role between zones. Many real deployments are both at once. |
+
+### 16.3 SSH public-key authentication, step by step
+
+1. A key pair is generated on the user's machine, usually with `ssh-keygen` (produces a private key that never leaves the machine, and a matching public key).
+2. The public key is copied to the target server, typically with `ssh-copy-id`.
+3. The server stores the public key and marks it as authorized (`~/.ssh/authorized_keys`).
+4. On connection, the server challenges the client to prove possession of the matching private key (a cryptographic challenge-response) — the private key itself is never transmitted.
+
+**Why this beats password auth:** the credential that matters (the private key) never crosses the network, even during login, so there is nothing for an on-path attacker to capture. It also supports per-user, individually-revocable keys instead of a shared password.
+
+| Interviewer follow-up | Practical answer cue |
+| --- | --- |
+| "What's actually sent over the wire during SSH public-key login?" | A signed challenge proving possession of the private key — not the private key, and not a password. The server only ever needed the public key in advance. |
+| "How do you revoke one engineer's SSH access without rotating everyone's keys?" | Remove only that public key from `authorized_keys` (or the equivalent centrally-managed key-distribution system) — keys are per-identity, unlike a single shared password. |
+
+### 16.4 Keeping sensitive data out of logs
+
+Three complementary techniques, applied in order of where they intercept the data:
+
+**1. Compartmentalize — don't let sensitive fields become the system's primary key.** Using an SSN or email as the join key between tables/services means every table and endpoint that references the record ends up touching the sensitive value too. Replace it with a generated external ID up front:
+
+| SSN (sensitive) | External ID (used everywhere else) |
+| --- | --- |
+| 999-99-9999 | `5a2_cXKrt32DcWOJpJlyhr7FhTcLPfvlEAb1eA2H` |
+
+A common mistake is hashing the sensitive field instead and using the hash as the key: for a small input domain (SSNs, phone numbers), an attacker can simply hash every possible input and match — hashing is not a substitute for a random, non-reversible-by-enumeration external ID.
+
+**2. Keep sensitive values out of URLs.** Request URLs are routinely logged by proxies, web servers and browser history. An endpoint like `/user/<email>` guarantees the email ends up in multiple logs. Prefer routing on the external ID from step 1, or — if the value is read-only but must be submitted — pass it in a POST body instead, since bodies are not logged by default the way URLs are.
+
+**3. Redact at the point of serialization, not at every call site.** Relying on every developer to remember not to log a field is fragile. Instead, make the unsafe action impossible by construction — e.g. a `toString()`/serializer that only ever emits the record's ID, or a logging-pipeline filter that redacts by key name/regex before anything reaches storage:
+
+```text
+cleanedDetails = details.map((key, value) => {
+    if (sensitiveKeys.contains(key) || looksLikeSSN(value) || looksLikeEmail(value)) {
+        return (key, "<redacted>");
+    }
+    return (key, value);
+});
+log(cleanedDetails);
+```
+
+| Interviewer follow-up | Practical answer cue |
+| --- | --- |
+| "We hashed the SSN before storing it as a key — isn't that safe?" | Not for a small input domain. All ~10^9 possible SSNs can be hashed in minutes to hours on commodity/GPU hardware (salting slows but doesn't prevent this for such a small space); use a random external ID instead, with the hash/sensitive value held only where strictly necessary. |
+| "Our `toString()` logs every field for easier debugging — what's wrong with that?" | It makes leaking a new sensitive field a silent regression any time someone adds one, because the default behavior is "log everything." Redact at the serializer so adding a field is safe by default, and look up full details by ID only when actually debugging. |
+| "This is scattered across section 13/14 already as 'redact logs' — what's new here?" | Those sections flag *that* logs/telemetry must be redacted during transport and encryption discussions. This section is the concrete mechanism — compartmentalize the schema, keep values out of URLs, and centralize redaction at serialization — rather than a per-call-site reminder. |
+
 ## References
 
 - [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html)
@@ -1242,7 +1326,7 @@ flowchart TD
 - [OAuth 2.0 Security Best Current Practice](https://www.rfc-editor.org/rfc/rfc9700)
 - [Token introspection](https://www.rfc-editor.org/rfc/rfc7662)
 - [JSON Web Key](https://www.rfc-editor.org/rfc/rfc7517)
-- [Spring implementation notes](Spring-Security-Interview-Notes.md)
+- [Spring implementation notes](../spring/Spring-Security-Notes.md)
 - [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
 - [OWASP Forgot Password Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html)
 - [OWASP Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)

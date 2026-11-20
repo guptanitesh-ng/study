@@ -4,7 +4,7 @@ Reviewed: November 19, 2026. Source: personal JMS/MDB notes covering message ana
 
 **Context that shapes this file:** 20+ years hands-on with ActiveMQ, RabbitMQ, and IBM MQ — mostly through legacy EJB MDBs — but no production Kafka experience, which is now the de-facto expectation in interviews. This is explainable, not disqualifying: Kafka adoption accelerated well after the EJB/MQ-heavy era most JMS experience comes from. The content below is deliberately organized as a **bridge** — JMS/MQ concept first (where the existing depth already is), Kafka equivalent second, and the real difference that trips people up third. That structure is also the one to use in the interview itself: lead with depth, map it forward, don't fake Kafka production history.
 
-Related: [Spring Boot](Spring-Boot-Interview-Notes.md) (where `@JmsListener`/`@KafkaListener` fit), [REST + MVC](Spring-REST-MVC-Interview-Notes.md#request-reply) (sync alternatives to request-reply messaging).
+Related: [Spring Boot](../spring/Spring-Boot-Notes.md) (where `@JmsListener`/`@KafkaListener` fit), [REST + MVC](../spring/Spring-REST-MVC-Notes.md#request-reply) (sync alternatives to request-reply messaging).
 
 ## 1. JMS fundamentals, kept — these still get asked
 

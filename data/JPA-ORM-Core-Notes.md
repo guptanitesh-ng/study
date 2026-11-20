@@ -1,12 +1,12 @@
-# JPA and ORM Core: Interview Notes
+# JPA and ORM Core Notes
 
 Reviewed: October 31, 2026. Source: two personal notes documents, dated 27-28 May 2019 (`ORM.pdf`, `JPA.pdf`), written while working with JPA under EJB containers rather than Spring Data.
 
-These are framework-agnostic JPA/Hibernate spec notes: entity rules, lifecycle, locking, caching, inheritance and JTA. None of it is Spring Data specific, so it lives here rather than inside [Spring-Data-Interview-Notes.md](Spring-Data-Interview-Notes.md), which stays focused on Spring's repository/transaction abstractions over this same spec. Read this doc first if your hands-on JPA experience predates Spring Data (for example, container-managed persistence in EJB); it gives you the vocabulary to reframe that experience in Spring Boot/Spring Data terms rather than starting from zero.
+These are framework-agnostic JPA/Hibernate spec notes: entity rules, lifecycle, locking, caching, inheritance and JTA. None of it is Spring Data specific, so it lives here rather than inside [Spring-Data-Notes.md](../spring/Spring-Data-Notes.md), which stays focused on Spring's repository/transaction abstractions over this same spec. Read this doc first if your hands-on JPA experience predates Spring Data (for example, container-managed persistence in EJB); it gives you the vocabulary to reframe that experience in Spring Boot/Spring Data terms rather than starting from zero.
 
 This is an editorial conversion, not a verbatim transcript: outdated package names, deprecated APIs and a couple of oversimplified claims from the 2019 notes are corrected inline.
 
-Companion guides: [Spring Core](Spring-Core-Interview-Notes.md), [Spring Boot](Spring-Boot-Interview-Notes.md), [Spring Data](Spring-Data-Interview-Notes.md), [SQL](SQL-Interview-Notes.md).
+Companion guides: [Spring Core](../spring/Spring-Core-Notes.md), [Spring Boot](../spring/Spring-Boot-Notes.md), [Spring Data](../spring/Spring-Data-Notes.md), [SQL](SQL-Notes.md).
 
 ## Contents
 
@@ -106,7 +106,7 @@ Four entity states, and what each `EntityManager` operation does to them:
 
 Note the same `merge()` subtlety called out in the Spring Data notes: it never mutates the argument you pass for an already-detached/new entity — you must use the **returned** instance for further tracked work. This is a spec guarantee, not a Spring Data convenience.
 
-`persist()` returns `void`; there is no spec-level `save()`. (Hibernate's native `Session.save()` is a different, deprecated-since-6.x API — see [Spring-Data-Interview-Notes.md §4](Spring-Data-Interview-Notes.md#4-jpa-state-and-entitymanager) for the full comparison against Spring Data's `save()`.)
+`persist()` returns `void`; there is no spec-level `save()`. (Hibernate's native `Session.save()` is a different, deprecated-since-6.x API — see [Spring-Data-Notes.md §4](../spring/Spring-Data-Notes.md#4-jpa-state-and-entitymanager) for the full comparison against Spring Data's `save()`.)
 
 ## 6. Fetching strategies and the one-to-one N+1 trap
 
@@ -182,7 +182,7 @@ Collections can be cached too (`@Cache` on the collection-valued field/getter, s
 
 This section is deliberately framed around your actual background — container-managed JPA in EJB — since it maps directly onto how Spring explains the same concepts, just with different vocabulary.
 
-**JTA (Java Transaction API)** coordinates a transaction across multiple enlisted resources (e.g., two different databases, or a database plus a JMS queue) via a **transaction manager** acting as coordinator and resource managers implementing the **XA** protocol. **Two-phase commit (2PC)**: phase 1, the coordinator asks every enlisted resource to *prepare* (durably record it can commit); phase 2, once all resources vote "yes," the coordinator tells all of them to *commit* (or, if any voted "no," tells all to *rollback*). This is what gives you atomicity across heterogeneous resources — and its real cost: XA resources are slower (extra round trips, durable prepare records) and a coordinator crash between phase 1 and phase 2 can leave a resource "in doubt" until manual/automatic recovery — which is why most single-database Spring Boot apps deliberately avoid JTA/XA and use a local `JpaTransactionManager` instead (see [Spring-Data-Interview-Notes.md §2](Spring-Data-Interview-Notes.md#2-transaction-managers-and-boundaries)), reserving JTA for the genuine multi-resource case.
+**JTA (Java Transaction API)** coordinates a transaction across multiple enlisted resources (e.g., two different databases, or a database plus a JMS queue) via a **transaction manager** acting as coordinator and resource managers implementing the **XA** protocol. **Two-phase commit (2PC)**: phase 1, the coordinator asks every enlisted resource to *prepare* (durably record it can commit); phase 2, once all resources vote "yes," the coordinator tells all of them to *commit* (or, if any voted "no," tells all to *rollback*). This is what gives you atomicity across heterogeneous resources — and its real cost: XA resources are slower (extra round trips, durable prepare records) and a coordinator crash between phase 1 and phase 2 can leave a resource "in doubt" until manual/automatic recovery — which is why most single-database Spring Boot apps deliberately avoid JTA/XA and use a local `JpaTransactionManager` instead (see [Spring-Data-Notes.md §2](../spring/Spring-Data-Notes.md#2-transaction-managers-and-boundaries)), reserving JTA for the genuine multi-resource case.
 
 **Where ACID fits in:** 2PC is specifically how JTA protects **atomicity** across multiple enlisted resources (all commit or none do), and transitively their individual **durability** (each resource's own commit record survives a crash once phase 2 completes). **Consistency** (your invariants hold before and after) is mostly an application/schema-constraint concern that 2PC doesn't buy you by itself; **isolation** is the connection-level setting from §7, orthogonal to whether 2PC is involved at all. A single-resource local transaction (`JpaTransactionManager`) gets atomicity, isolation, and durability from that one database engine for free and never needs 2PC — you only pay 2PC's extra-round-trip, in-doubt-on-crash cost when atomicity has to span more than one resource manager.
 
@@ -289,7 +289,7 @@ From the 2019 notes' "JPA 2.1 new features" list, the durable ones worth remembe
 If asked "you haven't used Spring Data — can you still work with JPA in Spring Boot?", the accurate answer is yes, on two levels:
 
 1. **Spring Boot + plain JPA, no Spring Data:** inject `EntityManager` directly (via `@PersistenceContext` or Framework 7's broader injection options) inside a `@Transactional` `@Service`, write JPQL/Criteria queries by hand, exactly like the EJB-container experience — just with Spring's `JpaTransactionManager` managing the transaction instead of container-managed JTA. This is a completely normal, supported pattern, not a stopgap.
-2. **Spring Data JPA:** builds repository proxies *over* that same `EntityManager`/JPA layer — `save()` still resolves to `persist()`/`merge()` underneath (see [Spring-Data-Interview-Notes.md §4](Spring-Data-Interview-Notes.md#4-jpa-state-and-entitymanager)), derived query methods generate JPQL for you, and `Page`/`Slice` wrap the same count/limit-offset SQL you'd otherwise hand-write. None of your lifecycle/locking/caching/inheritance knowledge from this document becomes obsolete — Spring Data is a convenience layer on top of it, not a replacement for it.
+2. **Spring Data JPA:** builds repository proxies *over* that same `EntityManager`/JPA layer — `save()` still resolves to `persist()`/`merge()` underneath (see [Spring-Data-Notes.md §4](../spring/Spring-Data-Notes.md#4-jpa-state-and-entitymanager)), derived query methods generate JPQL for you, and `Page`/`Slice` wrap the same count/limit-offset SQL you'd otherwise hand-write. None of your lifecycle/locking/caching/inheritance knowledge from this document becomes obsolete — Spring Data is a convenience layer on top of it, not a replacement for it.
 
 Framing for an interview: "My production JPA experience is container-managed under EJB rather than Spring Data, but the persistence semantics — entity lifecycle, locking, caching, N+1, transaction boundaries — are the same spec either way. Spring Data's `save()`/derived queries are a thin layer over the `EntityManager` calls I've already written by hand, and I've since worked with Spring Boot + JPA directly, so adopting Spring Data's repository conventions on a new codebase is a quick ramp-up, not a gap."
 
@@ -335,7 +335,7 @@ Default to `SINGLE_TABLE` unless subclass-specific columns are numerous/mutually
 ## Change references
 
 - `javax.persistence` → `jakarta.persistence` namespace migration noted wherever the source notes used the older package name (§1, §14).
-- Hibernate's native `Session.save()` flagged as deprecated/legacy rather than the modern equivalent of persisting an entity (§5; full comparison in [Spring-Data-Interview-Notes.md §4](Spring-Data-Interview-Notes.md#4-jpa-state-and-entitymanager)).
+- Hibernate's native `Session.save()` flagged as deprecated/legacy rather than the modern equivalent of persisting an entity (§5; full comparison in [Spring-Data-Notes.md §4](../spring/Spring-Data-Notes.md#4-jpa-state-and-entitymanager)).
 - `LockModeType.READ`/`WRITE` legacy names corrected to their current `OPTIMISTIC`/`OPTIMISTIC_FORCE_INCREMENT` equivalents (§7).
 - "ORM removes the need to understand SQL" claim from the source notes softened to the actual trade-off (§13).
 

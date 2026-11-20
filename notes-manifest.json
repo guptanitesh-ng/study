@@ -2,94 +2,119 @@
   "version": 1,
   "notes": [
     {
-      "path": "Security-Interview-Notes.md",
-      "title": "Application Security: Practical Interview Notes",
-      "bytes": 119584
+      "path": "security/Security-Notes.md",
+      "title": "Application Security: Practical Notes",
+      "bytes": 128946
     },
     {
-      "path": "Cosmos-DB-Interview-Notes.md",
-      "title": "Azure Cosmos DB: Interview Notes",
-      "bytes": 12217
+      "path": "design/Architecture-Notes.md",
+      "title": "Architecture Notes",
+      "bytes": 20674
     },
     {
-      "path": "Caching-Interview-Notes.md",
-      "title": "Caching and Redis: Interview Notes",
-      "bytes": 13537
+      "path": "data/Cosmos-DB-Notes.md",
+      "title": "Azure Cosmos DB Notes",
+      "bytes": 12175
     },
     {
-      "path": "Cloud-Fundamentals-Interview-Notes.md",
-      "title": "Cloud Fundamentals, Containers and CI/CD: Interview Notes",
-      "bytes": 28851
+      "path": "data/Caching-Notes.md",
+      "title": "Caching and Redis Notes",
+      "bytes": 13526
     },
     {
-      "path": "Java-Core-Interview-Notes.md",
-      "title": "Core Java: Practical Interview Notes through Java 21",
-      "bytes": 110213
+      "path": "cloud/Cloud-Fundamentals-Notes.md",
+      "title": "Cloud Fundamentals, Containers and CI/CD Notes",
+      "bytes": 28830
     },
     {
-      "path": "Elasticsearch-Interview-Notes.md",
+      "path": "java/Java-Core-Notes.md",
+      "title": "Core Java: Practical Notes through Java 21",
+      "bytes": 110203
+    },
+    {
+      "path": "design/Design-Patterns-Principles-Notes.md",
+      "title": "Design Patterns & Principles Notes",
+      "bytes": 28540
+    },
+    {
+      "path": "data/Elasticsearch-Notes.md",
       "title": "Elasticsearch: Core Concepts, Mapping, Search Internals, and Tuning",
-      "bytes": 17625
+      "bytes": 17615
     },
     {
-      "path": "Java-8-Lambdas-Streams-Optional.md",
+      "path": "java/Java-8-Lambdas-Streams-Optional.md",
       "title": "Java 8: Lambdas, Streams, Optional and Date/Time",
-      "bytes": 22166
+      "bytes": 22156
     },
     {
-      "path": "Java-Collections-DataStructures.md",
+      "path": "java/Java-Collections-DataStructures.md",
       "title": "Java Collections and Data Structures",
       "bytes": 32194
     },
     {
-      "path": "Java-Multithreading-Concurrency.md",
+      "path": "java/Java-Multithreading-Concurrency.md",
       "title": "Java Multithreading Concurrency",
       "bytes": 95863
     },
     {
-      "path": "Java-Exceptions-Generics-IO-Serialization.md",
+      "path": "java/Java-Exceptions-Generics-IO-Serialization.md",
       "title": "Java: Exceptions, Generics, I/O, Serialization and Garbage Collection",
       "bytes": 75354
     },
     {
-      "path": "JPA-ORM-Core-Interview-Notes.md",
-      "title": "JPA and ORM Core: Interview Notes",
-      "bytes": 48042
+      "path": "data/JPA-ORM-Core-Notes.md",
+      "title": "JPA and ORM Core Notes",
+      "bytes": 47971
     },
     {
-      "path": "Message-Middleware-Interview-Notes.md",
+      "path": "cloud/Message-Middleware-Notes.md",
       "title": "Message Middleware: JMS, MDBs and the Kafka Gap",
       "bytes": 16911
     },
     {
-      "path": "Spring-Boot-Interview-Notes.md",
-      "title": "Spring Boot: Interview Notes",
-      "bytes": 64427
+      "path": "design/Microservices-Toolkit-Notes.md",
+      "title": "Microservices Toolkit Notes",
+      "bytes": 41636
     },
     {
-      "path": "Spring-Core-Interview-Notes.md",
-      "title": "Spring Core: Interview Notes (refreshed for 2026)",
-      "bytes": 84458
+      "path": "spring/Spring-Boot-Notes.md",
+      "title": "Spring Boot Notes",
+      "bytes": 64356
     },
     {
-      "path": "Spring-Data-Interview-Notes.md",
-      "title": "Spring Data and Data Access: Interview Notes",
-      "bytes": 67105
+      "path": "spring/Spring-Core-Notes.md",
+      "title": "Spring Core Notes (refreshed for 2026)",
+      "bytes": 84407
     },
     {
-      "path": "Spring-REST-MVC-Interview-Notes.md",
-      "title": "Spring REST + MVC: Interview Notes",
-      "bytes": 63811
+      "path": "spring/Spring-Data-Notes.md",
+      "title": "Spring Data and Data Access Notes",
+      "bytes": 67044
     },
     {
-      "path": "Spring-Security-Interview-Notes.md",
-      "title": "Spring Security: Interview Notes",
-      "bytes": 22007
+      "path": "spring/Spring-REST-MVC-Notes.md",
+      "title": "Spring REST + MVC Notes",
+      "bytes": 63760
     },
     {
-      "path": "SQL-Interview-Notes.md",
-      "title": "SQL: Interview Notes",
-      "bytes": 22473
+      "path": "spring/Spring-Security-Notes.md",
+      "title": "Spring Security Notes",
+      "bytes": 21980
+    },
+    {
+      "path": "data/SQL-Notes.md",
+      "title": "SQL Notes",
+      "bytes": 22422
+    },
+    {
+      "path": "design/System-Design-Notes.md",
+      "title": "System Design Notes",
+      "bytes": 15058
+    },
+    {
+      "path": "design/System-Design-Index.md",
+      "title": "System Design Prep: Navigation Index",
+      "bytes": 4627
     }
   ]
 }

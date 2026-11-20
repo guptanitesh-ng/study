@@ -1,8 +1,8 @@
-# Azure Cosmos DB: Interview Notes
+# Azure Cosmos DB Notes
 
 Added: November 19, 2026. Source: general Cosmos DB working knowledge (no source PDF for this one) — written to close a specific resume gap: Cosmos DB is listed as a named skill, but day-to-day exposure is likely via an SDK/repository abstraction (similar to the Elasticsearch and Redis gaps already documented), not hands-on partition/throughput design. This file is scoped to the decisions an interviewer actually probes: partition-key design, RU economics, consistency-level trade-offs, and where Cosmos differs from the relational/Elasticsearch mental models you already have deep notes on.
 
-Related: [Elasticsearch](Elasticsearch-Interview-Notes.md) (both are JSON-document stores, but solve different problems), [Caching/Redis](Caching-Interview-Notes.md#1-in-process-vs-distributed-cache) (distributed-store failure-mode thinking transfers directly), [SQL](SQL-Interview-Notes.md) (contrast against the relational model you already know well).
+Related: [Elasticsearch](Elasticsearch-Notes.md) (both are JSON-document stores, but solve different problems), [Caching/Redis](Caching-Notes.md#1-in-process-vs-distributed-cache) (distributed-store failure-mode thinking transfers directly), [SQL](SQL-Notes.md) (contrast against the relational model you already know well).
 
 ## 1. The mental model shift: it's not "NoSQL MySQL"
 
@@ -71,7 +71,7 @@ The **change feed** is a persistent, ordered (per logical partition) log of inse
 - **Event-driven integration** — trigger downstream processing (notifications, search-index sync, audit trail) without polling or dual-writing from application code.
 - **Azure Functions Cosmos DB trigger** is the most common consumption pattern — a function fires per batch of changes per partition, with checkpointing (lease container) tracking progress so a restart resumes rather than reprocesses from the start.
 
-This is conceptually the same "events as integration, not direct coupling" idea from your [messaging notes](Message-Middleware-Interview-Notes.md) — change feed is Cosmos acting as both the system of record *and* the event source, instead of needing an outbox pattern to a separate broker.
+This is conceptually the same "events as integration, not direct coupling" idea from your [messaging notes](../cloud/Message-Middleware-Notes.md) — change feed is Cosmos acting as both the system of record *and* the event source, instead of needing an outbox pattern to a separate broker.
 
 ## 6. Cosmos vs. Elasticsearch vs. relational — when each actually fits
 

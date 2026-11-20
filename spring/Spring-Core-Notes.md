@@ -1,10 +1,10 @@
-# Spring Core: Interview Notes (refreshed for 2026)
+# Spring Core Notes (refreshed for 2026)
 
 > Based on the attached four-page PDF, dated May 21, 2018. The original covers useful foundations, but mixes in outdated APIs, legacy XML examples, and a few misleading simplifications. This version preserves its core topics, corrects those points, and adds high-value gaps. It is a study guide, not a claim that every job uses Spring Framework 7.
 
 Reviewed: October 31, 2026. This is an editorial conversion, not a verbatim transcript.
 
-Companion guides: [Boot](Spring-Boot-Interview-Notes.md), [REST + MVC](Spring-REST-MVC-Interview-Notes.md), [Data](Spring-Data-Interview-Notes.md), [Security](Spring-Security-Interview-Notes.md).
+Companion guides: [Boot](Spring-Boot-Notes.md), [REST + MVC](Spring-REST-MVC-Notes.md), [Data](Spring-Data-Notes.md), [Security](Spring-Security-Notes.md).
 
 ## How relevant are the original notes?
 

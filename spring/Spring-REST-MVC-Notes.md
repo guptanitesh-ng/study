@@ -1,10 +1,10 @@
-# Spring REST + MVC: Interview Notes
+# Spring REST + MVC Notes
 
 Reviewed: October 31, 2026. Source: the four-page Spring REST + MVC PDF, dated May 8, 2017, containing some later Framework 5 material. Sections 11-15 add architecture/theory and protocol-comparison material from two later PDFs ("REST / SOAP Concepts" and "REST Impl"); JAX-RS-specific recipes from the second PDF are intentionally kept minimal because current REST work is almost always through Spring Boot, not raw JAX-RS/Java EE.
 
 This editorial Markdown conversion retains original subject coverage, replaces stale recipes, and explicitly adds interview gaps. It is not a line-by-line transcript. XML/JSP examples are summarized as legacy recognition material; choose Java configuration for modern examples.
 
-Study sequence: [Core](Spring-Core-Interview-Notes.md) -> [Boot](Spring-Boot-Interview-Notes.md) -> **REST + MVC** -> [Data](Spring-Data-Interview-Notes.md) -> [Security](Spring-Security-Interview-Notes.md).
+Study sequence: [Core](Spring-Core-Notes.md) -> [Boot](Spring-Boot-Notes.md) -> **REST + MVC** -> [Data](Spring-Data-Notes.md) -> [Security](Spring-Security-Notes.md).
 
 ## 1. Servlet MVC request flow
 

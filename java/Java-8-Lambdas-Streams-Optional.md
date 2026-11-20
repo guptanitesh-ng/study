@@ -16,7 +16,7 @@ This guide collects the Java 8 functional-programming material that used to live
 
 ## 1. Default and static interface methods: the Java 8 entry point
 
-The full treatment — the diamond-style conflict between two default methods, resolving it with `Interface.super.method()`, precedence rules against a concrete superclass method, and Java 9's private interface helpers — lives in [Core Java](Java-Core-Interview-Notes.md#1-interfaces-from-contracts-to-shared-behavior), section 1. The short version worth repeating here:
+The full treatment — the diamond-style conflict between two default methods, resolving it with `Interface.super.method()`, precedence rules against a concrete superclass method, and Java 9's private interface helpers — lives in [Core Java](Java-Core-Notes.md#1-interfaces-from-contracts-to-shared-behavior), section 1. The short version worth repeating here:
 
 - A `default` method gives an interface a body so existing implementers do not break when a new operation is added.
 - A `static` interface method is a namespaced utility (`Notifier.isBlank(...)`); it is not inherited as an instance method by implementing classes.

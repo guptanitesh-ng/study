@@ -1,10 +1,10 @@
-# Spring Data and Data Access: Interview Notes
+# Spring Data and Data Access Notes
 
 Reviewed: October 31, 2026. Source: the two-page Spring Data PDF, dated May 21, 2018.
 
 The source is mostly Spring transaction management, ORM integration and JDBC, with only a short Spring Data JPA section. This editorial Markdown conversion retains those foundations, corrects misleading claims, and adds the repository/persistence/performance material missing from its title. It is not a verbatim transcript.
 
-Study sequence: [Core](Spring-Core-Interview-Notes.md) -> [Boot](Spring-Boot-Interview-Notes.md) -> [REST + MVC](Spring-REST-MVC-Interview-Notes.md) -> **Data** -> [Security](Spring-Security-Interview-Notes.md).
+Study sequence: [Core](Spring-Core-Notes.md) -> [Boot](Spring-Boot-Notes.md) -> [REST + MVC](Spring-REST-MVC-Notes.md) -> **Data** -> [Security](Spring-Security-Notes.md).
 
 ## 1. Distinguish the layers
 
@@ -47,7 +47,7 @@ Ordinary default rollback rules roll back on unchecked exceptions (`RuntimeExcep
 
 **High-value traps:**
 
-- Self-invocation bypasses ordinary transaction proxies; see [Core AOP](Spring-Core-Interview-Notes.md).
+- Self-invocation bypasses ordinary transaction proxies; see [Core AOP](Spring-Core-Notes.md).
 - Catching an exception is not guaranteed to clear a rollback-only marker. An inner `REQUIRED` scope can cause `UnexpectedRollbackException` when the outer caller tries to commit.
 - `REQUIRES_NEW` may need another connection while the outer transaction holds one. Size pools and concurrency accordingly.
 - `NESTED` is not a portable substitute for `REQUIRES_NEW`. Savepoint rollback depends on the manager; do not assume arbitrary JPA entity state is restored. An exception is not magically swallowed so the caller can continue.
