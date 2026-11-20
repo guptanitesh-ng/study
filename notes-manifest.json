@@ -79,12 +79,12 @@
     {
       "path": "spring/Spring-Boot-Notes.md",
       "title": "Spring Boot Notes",
-      "bytes": 64356
+      "bytes": 64407
     },
     {
       "path": "spring/Spring-Core-Notes.md",
       "title": "Spring Core Notes (refreshed for 2026)",
-      "bytes": 84407
+      "bytes": 84456
     },
     {
       "path": "spring/Spring-Data-Notes.md",
@@ -115,6 +115,11 @@
       "path": "design/System-Design-Index.md",
       "title": "System Design Prep: Navigation Index",
       "bytes": 4627
+    },
+    {
+      "path": "spring/Testing-Practices-Notes.md",
+      "title": "Testing Practices: Condensed Refresher (JUnit, Mockito, TDD)",
+      "bytes": 7865
     }
   ]
 }

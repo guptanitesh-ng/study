@@ -4,7 +4,7 @@ Reviewed: October 31, 2026. Source: the four-page Spring Boot PDF, dated Septemb
 
 This is an editorial Markdown conversion, not a verbatim transcript: original topics are retained in condensed form, outdated claims are corrected, and additions are identified. Screenshots/diagrams are not reproduced; text references to them are not a substitute for inspecting the PDF. Priorities below are study recommendations, not predictions of a particular interview.
 
-Study sequence: [Core](Spring-Core-Notes.md) -> **Boot** -> [REST + MVC](Spring-REST-MVC-Notes.md) -> [Data](Spring-Data-Notes.md) -> [Security](Spring-Security-Notes.md).
+Study sequence: [Core](Spring-Core-Notes.md) -> **Boot** -> [REST + MVC](Spring-REST-MVC-Notes.md) -> [Data](Spring-Data-Notes.md) -> [Security](Spring-Security-Notes.md) -> [Testing Practices](Testing-Practices-Notes.md).
 
 ## How to learn from these examples
 

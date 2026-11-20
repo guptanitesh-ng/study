@@ -4,7 +4,7 @@
 
 Reviewed: October 31, 2026. This is an editorial conversion, not a verbatim transcript.
 
-Companion guides: [Boot](Spring-Boot-Notes.md), [REST + MVC](Spring-REST-MVC-Notes.md), [Data](Spring-Data-Notes.md), [Security](Spring-Security-Notes.md).
+Companion guides: [Boot](Spring-Boot-Notes.md), [REST + MVC](Spring-REST-MVC-Notes.md), [Data](Spring-Data-Notes.md), [Security](Spring-Security-Notes.md), [Testing Practices](Testing-Practices-Notes.md).
 
 ## How relevant are the original notes?
 
