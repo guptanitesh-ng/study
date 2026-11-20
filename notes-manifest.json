@@ -37,6 +37,11 @@
       "bytes": 28540
     },
     {
+      "path": "dsa/DSA-Practice-Log.md",
+      "title": "DSA Practice Log",
+      "bytes": 4840
+    },
+    {
       "path": "data/Elasticsearch-Notes.md",
       "title": "Elasticsearch: Core Concepts, Mapping, Search Internals, and Tuning",
       "bytes": 17615
@@ -112,9 +117,14 @@
       "bytes": 15058
     },
     {
+      "path": "design/System-Design-Practice-Log.md",
+      "title": "System Design Practice Log",
+      "bytes": 3585
+    },
+    {
       "path": "design/System-Design-Index.md",
       "title": "System Design Prep: Navigation Index",
-      "bytes": 4627
+      "bytes": 5018
     },
     {
       "path": "spring/Testing-Practices-Notes.md",

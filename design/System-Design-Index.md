@@ -1,6 +1,6 @@
 # System Design Prep: Navigation Index
 
-Reviewed: November 20, 2026. Purpose: a thin cross-linking map tying together the four files that make up the HLD/LLD/System-Design prep track — [Design-Patterns-Principles-Notes.md](Design-Patterns-Principles-Notes.md), [Architecture-Notes.md](Architecture-Notes.md), [Microservices-Toolkit-Notes.md](Microservices-Toolkit-Notes.md), and [System-Design-Notes.md](System-Design-Notes.md). This file has no new content of its own — it exists purely so that "if asked about X, go to file Y, section Z" is a 10-second lookup instead of a guessing game under interview pressure.
+Reviewed: November 20, 2026. Purpose: a thin cross-linking map tying together the four files that make up the HLD/LLD/System-Design prep track — [Design-Patterns-Principles-Notes.md](Design-Patterns-Principles-Notes.md), [Architecture-Notes.md](Architecture-Notes.md), [Microservices-Toolkit-Notes.md](Microservices-Toolkit-Notes.md), and [System-Design-Notes.md](System-Design-Notes.md). This file has no new content of its own — it exists purely so that "if asked about X, go to file Y, section Z" is a 10-second lookup instead of a guessing game under interview pressure. Once this content is read, switch to [System-Design-Practice-Log.md](System-Design-Practice-Log.md) for the deliberate-practice loop and tracking template — imbibing this track is a practice problem, not a reading problem.
 
 ## How the four files relate
 
@@ -53,3 +53,4 @@ graph TD
 2. Architecture (macro decision layer — builds on #1).
 3. Microservices-Toolkit (deep-dive, read once decomposition/resilience/scalability concepts from Architecture are solid).
 4. System-Design (process + worked problems — the integration/practice layer; revisit after #1-3 are comfortable, and keep re-practicing the worked problems out loud).
+5. [System-Design-Practice-Log.md](System-Design-Practice-Log.md) — switch from reading to logged, timed reps here; this is the ongoing step, not a one-time read.

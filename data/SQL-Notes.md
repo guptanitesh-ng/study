@@ -1,6 +1,6 @@
 # SQL Notes
 
-Reviewed: November 18, 2026. Source: a personal notes document (`SQL Basics.pdf`), Oracle/PL-SQL flavored, covering joins, keys, indexing, cursors, stored procedures/functions, packages, triggers and query-tuning checklists. A second personal document (`DB.pdf`) on concurrency control, isolation levels and ACID contributed the indexing cross-reference below and was otherwise folded into [JPA-ORM-Core-Notes.md §7](JPA-ORM-Core-Notes.md#7-locking-optimistic-and-pessimistic) and [§9](JPA-ORM-Core-Notes.md#9-transactions-the-ejb-way-jta-2pcxa-persistence-context-scope), since that content is really about transaction/locking semantics, not SQL syntax.
+Reviewed: November 18, 2026. Source: a personal notes document (`SQL Basics.pdf`), Oracle/PL-SQL flavored, covering joins, keys, indexing, cursors, stored procedures/functions, packages, triggers and query-tuning checklists. A second personal document (`DB.pdf`) on concurrency control, isolation levels and ACID contributed the indexing cross-reference below and was otherwise folded into [JPA-ORM-Core-Notes.md §7](JPA-ORM-Core-Notes.md#7-locking-optimistic-and-pessimistic) and [§9](JPA-ORM-Core-Notes.md#9-transactions-the-ejb-way-jta-2pcxa-persistence-context-scope), since that content is really about transaction/locking semantics, not SQL syntax. §10 was added from a third, much older personal note (`Queries.pdf`, 2019) of classic query-writing drills — rewritten in portable ANSI SQL since the original relied on Oracle-only `ROWID`.
 
 You've said you're a backend developer, not primarily a DBA, so this file stays at the level interviewers actually probe backend candidates on: reading an execution plan well enough to explain *why* a query is slow, knowing which query shapes defeat an index, and the PL/SQL building blocks (cursors, procedures, triggers) well enough to discuss trade-offs — not writing production PL/SQL packages from scratch. Where Oracle-specific syntax is shown, the general concept (not the dialect) is what interviewers are grading.
 
@@ -17,6 +17,7 @@ Companion guides: [JPA/ORM Core](JPA-ORM-Core-Notes.md), [Spring Data](../spring
 7. Procedural SQL: cursors, procedures vs functions, packages, triggers
 8. Interview questions
 9. Postgres: governance, extensibility, and how it compares
+10. Classic query-writing patterns (quick reference)
 
 ## 1. Joins
 
@@ -130,3 +131,57 @@ This is awareness-level, system-design-adjacent content — not syntax or tuning
 | Kafka | — | Safe — log-centric streaming, replay and consumer groups are not a database problem |
 
 **Better heuristic than a feature checklist:** ask whether the specialist's capability is the *core of the product* or a *supporting feature*. Search as a feature → Postgres; search as the product → Elastic. Hierarchy as a feature → Postgres; graph as the product → Neo4j. The checklist always favors the specialist; the operational bill always favors consolidation.
+
+## 10. Classic query-writing patterns (quick reference)
+
+Lower-tier than the rest of this file — these are the "write it on a whiteboard" drills that still show up as a quick warm-up before the real discussion. Shown in portable ANSI SQL (window functions), not vendor-specific syntax, since that's also the better answer in an interview: it signals you reach for the standard tool, not an engine quirk.
+
+**Count per group:**
+```sql
+SELECT department_id, COUNT(*) AS headcount
+FROM employee
+GROUP BY department_id;
+```
+
+**Nth-highest value** (the old `WHERE salary < (SELECT MAX(salary) ...)` nesting trick doesn't handle ties or generalize past N=2-3 cleanly; `DENSE_RANK` does both):
+```sql
+SELECT employee_id, salary
+FROM (
+    SELECT employee_id, salary,
+           DENSE_RANK() OVER (ORDER BY salary DESC) AS rnk
+    FROM employee
+) ranked
+WHERE rnk = 3;   -- third-highest; DENSE_RANK means ties share a rank, no gap
+```
+
+**Above-average filter** (a correlated/aggregate subquery, not a join — mixing it into an implicit `FROM a, b` join, as older notes often do, is the same ANSI-89 comma-join style flagged as a readability/maintenance smell elsewhere in this file):
+```sql
+SELECT employee_id, salary
+FROM employee
+WHERE salary > (SELECT AVG(salary) FROM employee);
+```
+
+**Remove duplicate rows**: an Oracle-only version keys off physical `ROWID`, which doesn't exist in Postgres/MySQL/SQL Server. The portable version uses `ROW_NUMBER()` over whatever columns define a "duplicate":
+```sql
+WITH ranked AS (
+    SELECT ctid,  -- Postgres example; MySQL/SQL Server would use a surrogate PK instead
+           ROW_NUMBER() OVER (PARTITION BY employee_name, dept_id ORDER BY ctid) AS rn
+    FROM employee
+)
+DELETE FROM employee
+WHERE ctid IN (SELECT ctid FROM ranked WHERE rn > 1);
+```
+
+**Find rows with no match (the NULL/anti-join pattern)** — prefer `LEFT JOIN ... IS NULL` or `NOT EXISTS` over `NOT IN`, since `NOT IN` against a subquery that can return a `NULL` silently returns zero rows (see §4 above):
+```sql
+SELECT e.employee_id
+FROM employee e
+LEFT JOIN department d ON e.department_id = d.department_id
+WHERE d.department_id IS NULL;   -- employees with no matching department
+```
+
+**Date-range filter** — `BETWEEN` is inclusive on both ends; for a half-open range (e.g. "this calendar year, not including next Jan 1"), prefer explicit `>=`/`<`:
+```sql
+SELECT * FROM employee
+WHERE date_of_birth BETWEEN DATE '1980-01-01' AND DATE '2000-12-31';
+```
