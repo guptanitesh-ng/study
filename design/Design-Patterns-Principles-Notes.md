@@ -30,7 +30,25 @@ Related: [Architecture-Notes.md](Architecture-Notes.md), [Microservices-Toolkit-
 
 **Interview follow-up:** *"Give me a concrete example where strictly following LSP forced you to change a class hierarchy."* → Lead with Square/Rectangle, but better: describe a real case — a `ReadOnlyAccount` that extends `Account` and throws on `withdraw()` violates LSP because callers that only know about `Account` can legitimately call `withdraw()`. The fix is usually to separate the capability (`Withdrawable`) from the identity (`Account`) rather than forcing a type hierarchy to carry a behavioral restriction.
 
-## 2. Documentation frameworks (how you *describe* the design, not the design itself)
+## 2. The rest of the "10 design principles" (beyond SOLID)
+
+Interviewers sometimes ask for "10 design principles" expecting SOLID (5) plus five more. The common companion set:
+
+| Principle | One-liner | Reach for it when | Trade-off / gotcha |
+|---|---|---|---|
+| **DRY** — Don't Repeat Yourself | Every piece of knowledge should have one authoritative representation | You find the same business rule/constant duplicated across files | Over-applying DRY to code that merely *looks* similar (not *conceptually* the same) creates premature, brittle coupling — see "DRY vs. accidental duplication" below |
+| **KISS** — Keep It Simple | Prefer the simplest design that solves the actual problem | You're tempted to add a framework/abstraction layer "just in case" | The most commonly forgotten principle when people recall this list from memory — it's the sibling of YAGNI but about design complexity, not scope |
+| **YAGNI** — You Aren't Gonna Need It | Don't build speculative flexibility for requirements that don't exist yet | You're about to add a config flag/extension point with no current caller | Taken too far, it conflicts with OCP — the balance is building for *known* variation (OCP), not *imagined* variation (YAGNI) |
+| **Law of Demeter** — Principle of Least Knowledge | An object should only talk to its "immediate friends" (fields, params, things it creates) — not reach through them to their internals | You see chained calls like `a.getB().getC().getD()` | Strictly enforcing it can force an explosion of pass-through wrapper methods; apply it pragmatically to genuine encapsulation boundaries, not to every getter chain |
+| **Low Coupling / High Cohesion** | Modules should depend on as little of each other as possible, while each module's own responsibilities stay tightly related | You're deciding how to draw a class/module boundary | These two pull in tension with DIP/ISP — coupling is unavoidable at integration points; the goal is depending on *stable abstractions*, not eliminating coupling entirely |
+
+**DRY vs. accidental duplication:** two pieces of code can look identical today but represent *different* business rules that happen to coincide — e.g., tax calculation and discount calculation both currently compute `amount * 0.1`. Deduplicating them into one shared function couples two concepts that should be free to evolve independently; the first time one rate changes and the other doesn't, the "DRY" abstraction has to be unwound. The rule of thumb: DRY applies to one piece of *knowledge*, not to code that merely has the same shape.
+
+**Composition over Inheritance** is also frequently listed alongside these (see Inheritance vs. composition vs. delegation below) — it's really a corollary of LSP/Low-Coupling rather than an independent principle, which is why counts of "10 principles" vary by source.
+
+**Interview follow-up:** *"Give an example where YAGNI and OCP seem to conflict, and how you'd resolve it."* → A `PaymentProcessor` interface (OCP, so adding a new payment method doesn't require editing existing code) vs. speculatively building a plugin-loader/config-driven rule engine for payment methods nobody has asked for yet (YAGNI violation). Resolve by designing the *seam* (interface) now, since you already know variation is coming, but deferring the *infrastructure* (dynamic loading, config schema) until a second real implementation actually shows up.
+
+## 3. Documentation frameworks (how you *describe* the design, not the design itself)
 
 **C4 model** — four zoom levels for describing a system, used top-down:
 1. **Context** — the system as one box, plus the users/external systems it talks to.
@@ -51,7 +69,7 @@ A related artifact: a **Software Requirements Specification (SRS)** is the precu
 
 **Interview follow-up:** *"Your team already has a C4 diagram — why would you still produce a 4+1 view for a project?"* → Because C4 doesn't have a dedicated lens for runtime concurrency or for validating the design against specific end-to-end scenarios; if the project has non-trivial threading/process concerns, or the architecture needs sign-off against named use cases, 4+1's Process and Scenarios views say something C4 structurally can't.
 
-## 3. Creational patterns
+## 4. Creational patterns
 
 | Pattern | Problem it solves | Reach for it when | Trade-off / gotcha | Seen in |
 |---|---|---|---|---|
@@ -65,7 +83,7 @@ A related artifact: a **Software Requirements Specification (SRS)** is the precu
 
 **Interview follow-up:** *"What's wrong with using Singleton for a service that has test coverage?"* → It hides a hard dependency behind a static accessor, so tests can't substitute a mock without resorting to reflection or static-mocking frameworks; it also can't be subclassed/decorated for a test double, and if the singleton holds mutable state, tests become order-dependent through shared global state. The fix is almost always dependency injection with a singleton-scoped bean, which keeps "exactly one instance" without the static-access coupling.
 
-## 4. Structural patterns
+## 5. Structural patterns
 
 | Pattern | Problem it solves | Reach for it when | Trade-off / gotcha | Seen in |
 |---|---|---|---|---|
@@ -79,7 +97,7 @@ A related artifact: a **Software Requirements Specification (SRS)** is the precu
 
 **Interview follow-up:** *"When would you choose Decorator over just subclassing?"* → When the behaviors need to compose at runtime in different combinations (e.g., logging + caching, or caching alone, decided per request/config) rather than being fixed at compile time — subclassing gives you one fixed combination per class, and the number of subclasses explodes combinatorially (`LoggingCachingService`, `CachingService`, `LoggingService`...) while Decorator lets you wrap in whatever order you need.
 
-## 5. Behavioral patterns
+## 6. Behavioral patterns
 
 | Pattern | Problem it solves | Reach for it when | Trade-off / gotcha | Seen in |
 |---|---|---|---|---|
@@ -93,7 +111,7 @@ A related artifact: a **Software Requirements Specification (SRS)** is the precu
 
 **Interview follow-up:** *"Strategy vs. State — aren't they structurally identical (an interface + several implementations)?"* → Structurally, yes. The difference is intent and lifecycle: Strategy implementations are typically chosen once per call by an external caller and are stateless/interchangeable; State implementations represent one node in an object's own lifecycle and the *object itself* transitions between them (often the state object decides the next state). If you find your "Strategy" implementations referencing each other to decide "what comes next," you've actually built State.
 
-## 6. Inheritance vs. composition vs. delegation
+## 7. Inheritance vs. composition vs. delegation
 
 **Inheritance** is appropriate only when the "is-a" relationship holds at the level of **behavioral substitutability** (see LSP above) — not just taxonomically. **Composition** ("has-a") is the safer default: build behavior by holding a reference to another object and delegating to it, which avoids LSP traps entirely and doesn't lock you into a single base class (Java has no multiple inheritance of implementation).
 
@@ -101,7 +119,7 @@ A related artifact: a **Software Requirements Specification (SRS)** is the precu
 
 **Interview follow-up:** *"Why does 'favor composition over inheritance' matter in practice, not just in theory?"* → Because inheritance couples a subclass to the base class's implementation details across versions — a base-class change can silently break subclasses that depend on its internal call order (the fragile base class problem). Composition only couples you to the delegate's public interface, which is a much smaller, more stable surface to depend on.
 
-## 7. CQRS (Command Query Responsibility Segregation)
+## 8. CQRS (Command Query Responsibility Segregation)
 
 **Problem it solves:** a single schema optimized for writes (normalized, fast consistent writes) is usually bad for reads (requires many joins), and vice versa (a denormalized read-optimized schema is expensive/error-prone to keep consistent on write).
 
@@ -115,7 +133,7 @@ A related artifact: a **Software Requirements Specification (SRS)** is the precu
 
 **Interview follow-up:** *"Your product manager asks why the order list sometimes doesn't show an order that was 'just placed.' You're using CQRS — what's your answer, and how do you fix it if it's unacceptable?"* → That's the expected eventual-consistency lag between the write model and the read-model projection. If it's unacceptable for that specific critical path, don't rearchitect the whole system — add a **synchronous projection** for that one read model (update it in the same transaction as the write, at the cost of added write latency) while keeping other, less critical read models eventually consistent.
 
-## 8. Event Sourcing
+## 9. Event Sourcing
 
 **Problem it solves:** storing current-state rows loses history — you can't answer "what was the state at time T" or produce a reliable audit trail without separately logging every change.
 
@@ -130,7 +148,7 @@ A related artifact: a **Software Requirements Specification (SRS)** is the precu
 
 **Interview follow-up:** *"If event sourcing causes overselling risk, why would anyone use it for inventory at all?"* → Because the alternative — a single mutable "current stock" row — gives you none of the audit trail, replay, or point-in-time query capability, and the overselling risk is manageable by applying synchronous projections or optimistic-concurrency checks specifically on the hot "decrement stock" path, while leaving the rest of the system eventually consistent.
 
-## 9. Event ordering & idempotency (Idempotent Receiver pattern)
+## 10. Event ordering & idempotency (Idempotent Receiver pattern)
 
 **Problem it solves:** in any event/message-driven design, messages can arrive out of order (parallel consumers, retries, partitioned brokers) or be delivered more than once (at-least-once delivery, retried sends) — code that assumes neither can fail silently or corrupt state.
 
@@ -143,7 +161,7 @@ A related artifact: a **Software Requirements Specification (SRS)** is the precu
 
 **Interview follow-up:** *"A consumer processed 'UserUpdated' before 'UserCreated' for the same user ID — walk me through two different ways to handle it."* → (1) **Retry/delay queue:** detect the missing prerequisite (user not found), park the event in a delayed queue, retry after a backoff — simple to bolt onto an existing system, costs you an extra queue and some latency. (2) **Promise/pending state:** save the update against a placeholder "pending" record immediately, and reconcile once the create event arrives — avoids the retry infrastructure but adds a permanent "pending" state to your domain model that has to be designed and tested. Pick (1) for a quick fix to an existing system; design toward (2) only if you know this ordering race is common enough to be a real recurring case during initial design.
 
-## 10. Anti-patterns catalog (fast recall)
+## 11. Anti-patterns catalog (fast recall)
 
 | Anti-pattern | What it looks like |
 |---|---|
@@ -157,7 +175,7 @@ A related artifact: a **Software Requirements Specification (SRS)** is the precu
 
 **Interview follow-up:** *"How do Anemic Domain Model and God Object relate to each other?"* → They're often two halves of the same underlying problem: when behavior is stripped out of domain objects (Anemic Domain Model), it has to live *somewhere* — usually in a small number of oversized "manager"/"service" classes that end up accumulating unrelated responsibilities, becoming God Objects. Fixing one often means pushing behavior back onto the domain objects it was stripped from.
 
-## 11. UML diagram types (quick reference)
+## 12. UML diagram types (quick reference)
 
 | Diagram | Captures |
 |---|---|
@@ -171,7 +189,7 @@ A related artifact: a **Software Requirements Specification (SRS)** is the precu
 | Component | Structure/dependencies between deployable components (maps to C4 Container/Component) |
 | Deployment | Physical/infrastructure topology (maps to C4 Container, physical layer) |
 
-## 12. Analysis patterns vs. design patterns
+## 13. Analysis patterns vs. design patterns
 
 Martin Fowler's distinction: a **design pattern** solves a recurring *implementation* problem (Singleton, Observer); an **analysis pattern** captures a recurring *domain-modeling* problem — a reusable way to model a business concept (e.g., modeling "Party" as a supertype of Person/Organization so downstream code doesn't need to know which one it's dealing with). The practical interview distinction: design patterns are about *how you build it*, analysis patterns are about *how you model the domain before you build anything*.
 

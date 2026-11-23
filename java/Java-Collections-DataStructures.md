@@ -11,14 +11,15 @@ This guide collects the Collections material that used to be deferred inside the
 5. Internal working of `HashMap`
 6. Internal working of `HashSet`
 7. `TreeSet`, `HashSet`, `LinkedHashSet` and the Red-Black tree underneath
-8. `equals`/`hashCode` and why hash-based collections need them
-9. Iterators: fail-fast vs fail-safe, `Iterator` vs `ListIterator`, removing during iteration
-10. `NavigableMap`, `Map` vs `Hashtable`, and why `Map` doesn't extend `Collection`
-11. Thread-safety: `HashMap` vs `Hashtable` vs `SynchronizedMap` vs `ConcurrentHashMap`
-12. Nulls across collection implementations
-13. Specialized map/set types: `EnumSet`, `IdentityHashMap`, `WeakHashMap`
-14. Unmodifiable collections and the `Collections` utility class
-15. Related data structures beyond `java.util`: Quad Tree and vector databases
+8. `ArrayDeque` internals: the circular array underneath
+9. `equals`/`hashCode` and why hash-based collections need them
+10. Iterators: fail-fast vs fail-safe, `Iterator` vs `ListIterator`, removing during iteration
+11. `NavigableMap`, `Map` vs `Hashtable`, and why `Map` doesn't extend `Collection`
+12. Thread-safety: `HashMap` vs `Hashtable` vs `SynchronizedMap` vs `ConcurrentHashMap`
+13. Nulls across collection implementations
+14. Specialized map/set types: `EnumSet`, `IdentityHashMap`, `WeakHashMap`
+15. Unmodifiable collections and the `Collections` utility class
+16. Related data structures beyond `java.util`: Quad Tree and vector databases
 
 ## 1. Collections framework overview
 
@@ -229,7 +230,17 @@ All three implement `Set`, so they share the no-duplicates contract, but differ 
 
 **Degenerate `HashMap`/`HashSet` buckets:** if many keys collide into the same hash bucket (adversarial or just unlucky input), a plain linked chain inside that bucket regresses toward O(n) lookups. Using a `TreeMap` sidesteps this by paying O(log n) unconditionally, ordering by hash code (and then by `compareTo`/`Comparable` if hash codes tie) rather than relying on bucket distribution. Modern JDK `HashMap` implementations also treeify an individual bucket into a mini red-black tree once its chain grows past an internal threshold, which caps the worst case without changing the public `HashMap` API.
 
-## 8. `equals`/`hashCode` and why hash-based collections need them
+## 8. `ArrayDeque` internals: the circular array underneath
+
+Despite the name suggesting a linked structure, `ArrayDeque` is backed by a **resizable circular (ring) array** — a plain `Object[]`, not a doubly linked list.
+
+- **Layout:** `head` and `tail` index variables track the ends of the live data within the array. Elements don't shift when added/removed from either end; the indices just move, wrapping around the array's bounds via `(index + 1) & (array.length - 1)` — a bitmask instead of a modulo operator, which is why the backing array is always kept at a **power-of-two** size.
+- **Growth:** when the array fills up (`head` would collide with `tail`), it **doubles** in size and the elements are copied into the new array in logical order, re-establishing the circular layout. Like `ArrayList`, it only grows — there's no automatic shrink-to-fit.
+- **Complexity:** `addFirst`/`addLast`/`pollFirst`/`pollLast`/`peekFirst`/`peekLast` are all **O(1) amortized** — pure index arithmetic, no traversal and no per-element shifting, unlike `ArrayList.add(0, e)`. A resize is O(n) but amortizes to O(1) per operation, same reasoning as `ArrayList`'s doubling.
+- **No nulls:** `ArrayDeque` rejects null elements, because `null` is used internally as the sentinel marking an empty slot; `peekFirst()`/`peekLast()` on an empty deque rely on this to safely return `null` rather than ambiguous data.
+- **Why prefer it over the alternatives:** it's generally faster than `LinkedList` for stack/queue/deque use because there's no per-node allocation or pointer-chasing — better cache locality, same reason `ArrayList` tends to beat `LinkedList` in practice (section 4). It's also preferred over the legacy `Stack` class, which extends `Vector` and pays for synchronization on every operation even in single-threaded use.
+
+## 9. `equals`/`hashCode` and why hash-based collections need them
 
 Override `equals()`/`hashCode()` together, for two distinct reasons:
 
@@ -238,7 +249,7 @@ Override `equals()`/`hashCode()` together, for two distinct reasons:
 
 This is also why keys in a map (or elements in a set) should be **immutable**: mutating a key after insertion can change its hash code, stranding the entry in the wrong bucket so it can no longer be found by `get()`/`contains()`.
 
-## 9. Iterators: fail-fast vs fail-safe, `Iterator` vs `ListIterator`, removing during iteration
+## 10. Iterators: fail-fast vs fail-safe, `Iterator` vs `ListIterator`, removing during iteration
 
 ### Fail-fast vs fail-safe
 
@@ -258,7 +269,7 @@ This is also why keys in a map (or elements in a set) should be **immutable**: m
 
 Both remove and return the queue's head. On an empty queue, `remove()` throws, while `poll()` returns `null`. Which element counts as "head" depends on the queue's ordering policy — e.g. `PriorityQueue` keeps the lowest element per its `Comparator`/`Comparable` at the head.
 
-## 10. `NavigableMap`, `Map` vs `Hashtable`, and why `Map` doesn't extend `Collection`
+## 11. `NavigableMap`, `Map` vs `Hashtable`, and why `Map` doesn't extend `Collection`
 
 ### `NavigableMap`
 
@@ -279,7 +290,7 @@ Mainly because maps have an extra level of indirection that other collection typ
 - Maps **can** be viewed as collections (of keys, values, or entries), and that's exactly what the three "collection view" operations — `keySet()`, `values()`, `entrySet()` — are for.
 - The reverse view (a `List` as a `Map` from index to element) isn't offered, because removing a list element would silently shift the key associated with every subsequent element — a surprising side effect a real map view shouldn't have.
 
-## 11. Thread-safety: `HashMap` vs `Hashtable` vs `SynchronizedMap` vs `ConcurrentHashMap`
+## 12. Thread-safety: `HashMap` vs `Hashtable` vs `SynchronizedMap` vs `ConcurrentHashMap`
 
 `HashMap` and `Collections.synchronizedMap(new HashMap<>())` provide the same degree of synchronization. Wrapping `Hashtable` with `Collections.synchronizedMap()` would add a redundant extra layer of synchronization on top of an already-synchronized class.
 
@@ -302,7 +313,7 @@ The practical difference between `Hashtable` and `Collections.synchronizedMap(ha
 
 `Vector`, `Hashtable`, `Properties`, and `Stack` are synchronized by design and safe to use directly from multiple threads. For `List`/`Set`/`Map` classes that aren't inherently synchronized, `Collections.synchronizedXXX()` wraps them to add that synchronization.
 
-## 12. Nulls across collection implementations
+## 13. Nulls across collection implementations
 
 **Maps:**
 
@@ -323,9 +334,9 @@ The practical difference between `Hashtable` and `Collections.synchronizedMap(ha
 
 **Lists:** `ArrayList`, `LinkedList`, and other `List` implementations generally accept nulls freely.
 
-This connects back to the immutable-key point in section 8: an immutable key guarantees its hash code computation always yields the same result, which is exactly what a hash-based map/set depends on.
+This connects back to the immutable-key point in section 9: an immutable key guarantees its hash code computation always yields the same result, which is exactly what a hash-based map/set depends on.
 
-## 13. Specialized map/set types: `EnumSet`, `IdentityHashMap`, `WeakHashMap`
+## 14. Specialized map/set types: `EnumSet`, `IdentityHashMap`, `WeakHashMap`
 
 **`EnumSet`** — a specialized `Set` implementation for enum types; every element must come from a single enum type, specified explicitly or inferred from the first element added. Internally represented as a bit vector — `RegularEnumSet` uses a `long`, so it can represent up to 64 enum constants directly in that single word.
 
@@ -333,13 +344,13 @@ This connects back to the immutable-key point in section 8: an immutable key gua
 
 **`WeakHashMap`** — an entry is automatically removed once its key is no longer in ordinary use elsewhere; more precisely, holding a mapping for a key does not prevent that key from being garbage-collected. This makes it a reasonable building block for a memory-constrained cache, since the map itself cleans up unused entries rather than requiring explicit eviction logic.
 
-## 14. Unmodifiable collections and the `Collections` utility class
+## 15. Unmodifiable collections and the `Collections` utility class
 
 `Collections.unmodifiableList/Set/Map(...)` wraps a collection in a read-only view; any attempted mutation throws `UnsupportedOperationException`. As noted in section 2, this is a **view** over the original — changes made directly to the underlying collection remain visible through it, unlike the fully immutable `List.of`/`Set.of`/`Map.of` factories.
 
 Beyond the unmodifiable wrappers, `Collections` also provides: immutable empty collections, synchronized wrappers (`synchronizedList/Set/Map`), `binarySearch`, `min`, `max`, `reverse`, `shuffle`, and `sort`.
 
-## 15. Related data structures beyond `java.util`
+## 16. Related data structures beyond `java.util`
 
 These two don't live in `java.util` and aren't core "pick the right `Map` implementation" material, but they show up in system-design-adjacent interview conversations about spatial indexing and modern search/retrieval, so they're captured here rather than dropped.
 

@@ -45,8 +45,8 @@ Spend disproportionate reps on the right-hand column. The left-hand column just 
 
 ## How to use this file
 
-1. Pick the next problem from a "Practice first" pattern (rotate; don't binge one pattern for days).
-2. Solve it **timed, without looking up the pattern name first** — 20-25 min for Medium, 30-35 min for Hard. If stuck past the timer, look up the pattern (not the full solution), retry, then read the solution only after your own attempt.
+1. Pick the next problem from a "Practice first" pattern (rotate; don't binge one pattern for days). Knowing the category (e.g. "today's pick is from Graphs") is fine and intentional — that's what drives the rotation.
+2. Solve it **timed, without reading the editorial/discussion/approach hints first** — 20-25 min for Medium, 30-35 min for Hard. The point isn't hiding which pattern bucket it came from; it's not pre-loading the specific technique (e.g. "this is Dijkstra") before you've tried to recognize it yourself from the problem statement. If stuck past the timer, look up the approach, retry, then read the full solution only after your own attempt.
 3. Log one row below. Keep the "gap" terse — it's what you review, not a write-up.
 4. Every 2-3 days, re-solve (cold, no notes) 2-3 problems from the "Gaps found next" queue before taking new ones. Recall under a gap is the actual signal; solving it once proves nothing.
 

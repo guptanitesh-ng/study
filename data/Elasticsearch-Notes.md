@@ -55,6 +55,97 @@ The throughline across all four: ES moved from a protocol that required the clie
 
 **Reindexing is the recurring "gotcha" theme:** because a field's type can't be changed in place, any mapping correction (wrong analyzer, `text` vs `keyword` mistake, newly needed `nested` structure) requires creating a new index with the corrected mapping and reindexing all documents into it (the `_reindex` API), then swapping an alias to point at the new index. This alias-swap pattern — write/read through an alias, never a raw index name — is the practical answer to *"how do you change a mapping without downtime?"*
 
+### 3a. Analyzer, deep dive — the pipeline, not just the word
+
+An analyzer is a **3-stage pipeline** that only runs on `text` fields. The easy way to recall it: *"analyzers tokenize, normalizers don't."*
+
+```
+                char_filter(s)          tokenizer            token filter(s)
+"The Quick-Foxes!"  ──────────────►  "The Quick-Foxes!"  ──────────►  ["The","Quick","Foxes!"]  ──────────►  ["quick","fox"]
+                 (strip/replace           (split into                  (lowercase, stem,
+                  raw chars, e.g.          words/tokens —               remove stopwords,
+                  strip HTML)              this is the ONLY             synonym expand...)
+                                           stage that changes
+                                           the number of tokens)
+```
+
+1. **`char_filter`** — operates on the raw string *before* tokenization (e.g. `html_strip` to remove `<b>` tags, or a `mapping` char filter to turn `:)` into `happy`).
+2. **`tokenizer`** — exactly one per analyzer, splits the string into tokens (the `standard` tokenizer splits on whitespace/punctuation; this is the stage that decides "how many tokens do I get").
+3. **`token filter(s)`** — operate on the token *stream* (lowercase, `stop` to drop "the"/"a", `stemmer` to reduce "running"→"run", `synonym` to expand "car"→"car, automobile").
+
+This is why the `standard` analyzer run on `"The Quick-Foxes!"` indexes the tokens `["quick", "fox"]` — tokenizer splits on the hyphen and punctuation, lowercase filter runs, stemmer reduces "foxes"→"fox", and `the` is dropped as a stopword. **The same analyzer must run at query time** (or the index-time analyzer is reused by default) so the search term goes through the identical transform — this is the whole reason `match` finds `"quick fox"` even though nothing in the source matches that literal substring.
+
+Custom analyzer example, annotated stage-by-stage:
+
+```json
+PUT /products
+{
+  "settings": {
+    "analysis": {
+      "filter": {
+        "autocomplete_filter": {
+          "type": "edge_ngram",
+          "min_gram": 1,
+          "max_gram": 20
+        }
+      },
+      "analyzer": {
+        "autocomplete": {
+          "type": "custom",
+          "tokenizer": "standard",          // stage 2: split into words
+          "filter": [
+            "lowercase",                     // stage 3a: normalize case
+            "autocomplete_filter"            // stage 3b: expand "quick" -> q, qu, qui, quic, quick
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+**Recall trick:** char_filter = *"fix the raw text"*, tokenizer = *"cut it into pieces"*, token filter = *"fix each piece"*. Only the tokenizer can change the piece *count*; char_filter and token filter can only transform what's already there (or drop/expand existing tokens, in the case of `stop`/`synonym`/`edge_ngram`).
+
+**`analyzer` vs `search_analyzer` — a common trip-up with n-gram analyzers like the one above.** By default the same analyzer runs at index time and query time, but a mapping can override the query-time one with `search_analyzer`. For an edge-n-gram autocomplete field, you *want* this override: index time still expands `"quick"` into grams (`q`, `qu`, `qui`, ...) so partial prefixes match, but query time should use a plain `standard` analyzer so the typed search term is tokenized normally, not re-expanded into grams — using the n-gram analyzer on both sides would make a search for `"quick"` also match on unrelated short fragments it shouldn't.
+
+### 3b. Normalizer, deep dive — the same idea, minus the cutting
+
+A normalizer is for `keyword` fields, which are never tokenized (that's the entire point of `keyword` — exact match, one token in, one token out). A normalizer runs **char_filter + token filter only — no tokenizer stage**, so the string stays a single token but gets simple char-level cleanup applied:
+
+```
+                char_filter(s)                 token filter(s)                  (no tokenizer —
+"Nitesh GUPTA"  ──────────────►  "Nitesh GUPTA"  ──────────►  "nitesh gupta"        stays ONE token)
+```
+
+```json
+PUT /users
+{
+  "settings": {
+    "analysis": {
+      "normalizer": {
+        "lowercase_normalizer": {
+          "type": "custom",
+          "char_filter": [],
+          "filter": ["lowercase", "asciifolding"]   // e.g. "GUPTA" -> "gupta", "Café" -> "cafe"
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "username": {
+        "type": "keyword",
+        "normalizer": "lowercase_normalizer"
+      }
+    }
+  }
+}
+```
+
+Without the normalizer, `term` query `"GUPTA"` would miss a stored value of `"Gupta"` — `keyword` fields store the raw string verbatim by default, so `"Gupta" != "GUPTA"` byte-for-byte. The normalizer makes both index-time storage *and* query-time comparison go through the same lowercase transform, so the exact-match query becomes case-insensitive without turning the field into a tokenized `text` field (you'd still lose the ability to sort/aggregate/filter on it exactly if you went that route).
+
+**One-line distinction to say out loud in an interview:** *"Analyzer = tokenizer + filters, for `text`, multi-token output. Normalizer = filters only, no tokenizer, for `keyword`, single-token output — same family of char/token filters, just without the splitting stage."*
+
 ## 4. Indexing, mapping, searching — the three moving parts
 
 Everything in ES functionally decomposes into three aspects, and most "why is this behaving unexpectedly" questions map to exactly one of them:
@@ -105,4 +196,256 @@ The practical rule an abstraction layer usually gets right but is worth being ab
 | **Thread pool sizing (search/index/bulk pools)** | Matching thread pool capacity to actual node hardware and workload shape — undersized pools cause request rejection under load; oversized pools cause context-switch thrashing |
 | **Profile API** | The `EXPLAIN PLAN` equivalent for ES — breaks down exactly where time went inside a query (which clause, which phase) instead of guessing from aggregate latency; this is the right first move when "a query is slow" and you need to know *why* before reaching for any lever above |
 
+**Field mapping tuning, a concrete snippet:** these are all declared per field in the index mapping, not query-time options — so they only take effect at index-creation time (or via reindex for an existing index). A typical "don't pay for what you don't use" mapping:
+
+```json
+PUT /orders
+{
+  "mappings": {
+    "properties": {
+      "order_id":        { "type": "keyword" },
+      "internal_debug_blob": {
+        "type": "object",
+        "enabled": false
+      },
+      "warehouse_barcode": {
+        "type": "keyword",
+        "index": false
+      },
+      "product_name": {
+        "type": "text",
+        "norms": false
+      },
+      "customer_name": { "type": "text" },
+      "sku":           { "type": "keyword" },
+      "full_text_search": {
+        "type": "text"
+      }
+    }
+  }
+}
+```
+
+What each knob is actually doing:
+- **`"index": false`** (on `warehouse_barcode`) — the field is stored in `_source` and can be returned/retrieved, but Lucene never builds an inverted index entry for it, so you cannot query/filter/aggregate on it. Use this for fields you only ever display, never search (e.g. an internal reference code you show on a receipt but never filter orders by).
+- **`"enabled": false`** (on `internal_debug_blob`, an `object`/nested structure) — ES stores the raw JSON in `_source` but doesn't parse or index *any* sub-fields underneath it at all, not even implicitly. This is the right call for opaque blobs (raw webhook payloads, audit dumps) you need to retrieve verbatim but never search inside.
+- **`"norms": false`** (on `product_name`, a `text` field) — norms are the per-field, per-document length-normalization factors BM25 uses to compute relevance *score*. Disabling them saves index size/memory but makes the field unscoreable for relevance ranking — fine for a field you only ever use in a filter context (`term`/`match` inside a `filter` clause, which doesn't score) but never in a scored, ranked full-text query.
+- **`_all` / catch-all field** — this was a single synthetic field (pre-7.x) that concatenated every field's value so you could search across the whole document with one query. It's removed in modern versions; the explicit replacement is `copy_to`, where you opt specific fields into a dedicated combined field instead of indexing *everything* into one blob: `"customer_name": { "type": "text", "copy_to": "full_text_search" }`. The difference matters for an interview: `_all` was indiscriminate (and expensive) by default; `copy_to` is an explicit, cheaper, per-field choice.
+
+The common thread across all three (`index: false`, `enabled: false`, `norms: false`): every field ES fully indexes/analyzes/scores costs *write-time* CPU and *disk*, whether or not you ever query it that way — so the tuning instinct is to ask "do I filter on this?", "do I search inside this?", "do I rank by this?" per field, and turn off exactly the capabilities you don't need.
+
 **Interview-ready synthesis, one sentence per lever category:** throughput problems are solved by batching writes and relaxing replication during the load; search-latency problems are solved by not indexing/scoring fields you don't need and by measuring with the Profile API before guessing; capacity problems are solved by sizing shards and thread pools to the actual workload up front, because both are expensive to change after the fact.
+
+**Bulk API, the SQL analogy that makes the reasoning stick:** the `_bulk` endpoint is the same idea as a SQL batch update/insert — one network round trip carrying many operations (index/create/update/delete, mixed freely in one request) instead of a round trip per row. The saving isn't just network latency; each request on the ES side also pays fixed overhead (parsing, routing to the right shard, refresh/translog bookkeeping) that amortizes across the whole batch instead of being paid per document. The batch-size lever is the same tradeoff as SQL batching too — too small and per-request overhead still dominates, too large and a single oversized bulk request risks tripping the circuit breaker (`circuit_breaking_exception`) or timing out, so it's tuned empirically (commonly starting around a few MB or a few thousand documents per batch) rather than maximized blindly.
+
+## 7. Query DSL & aggregations — the shapes you'll actually be asked to write
+
+These are the query types that come up most in interviews, each with a runnable snippet. The organizing question for all of them: **"does this clause need to score, or just filter?"** — that single distinction drives whether something belongs in `query`/`must`/`should` (scored) or `filter`/`must_not` (not scored, cacheable).
+
+**`term` — exact match, no analysis.** Use on `keyword` fields only; running `term` against an analyzed `text` field is a classic interview gotcha because the field was tokenized/lowercased at index time, so an exact-case `term` match silently returns nothing.
+```json
+GET /employees/_search
+{
+  "query": {
+    "term": { "gender.keyword": "MALE" }
+  }
+}
+```
+
+**`match` — analyzed, scored full-text search.** The query string itself is analyzed the same way the field was at index time (lowercased, tokenized), so this is the right choice for free-text fields.
+```json
+GET /employees/_search
+{
+  "query": {
+    "match": { "designation": "senior software engineer" }
+  },
+  "sort": [{ "joining_date": "desc" }]
+}
+```
+Sorting on a `text` field directly fails (`text` fields aren't sort-ready — they're tokenized, so there's no single stable value to sort by) — this is why the project's mapping keeps a `keyword` sub-field (a "multi-field": `"designation": {"type":"text","fields":{"raw":{"type":"keyword"}}}`) purely so you can `sort` on `designation.raw` while still full-text-searching on `designation`.
+
+**`bool` — combining clauses, the one query shape you'll use constantly.**
+```json
+GET /employees/_search
+{
+  "query": {
+    "bool": {
+      "must":     [{ "match": { "designation": "engineer" } }],
+      "filter":   [{ "term":  { "department.keyword": "Engineering" } }],
+      "must_not": [{ "term":  { "marital_status.keyword": "DIVORCED" } }],
+      "should":   [{ "term":  { "location.keyword": "Bangalore" } }]
+    }
+  }
+}
+```
+`must`/`should` affect the relevance score; `filter`/`must_not` don't — they're pure yes/no and ES can cache them, so pushing anything that doesn't need scoring into `filter` is both a correctness and a performance choice.
+
+**`range` — numeric/date bounds.**
+```json
+GET /employees/_search
+{
+  "query": {
+    "range": { "joining_date": { "gte": "2015-01-01", "lte": "2020-12-31" } }
+  }
+}
+```
+
+Same query shape works identically on a plain numeric field — e.g. age between 8 and 12 inclusive:
+
+```json
+GET /people/_search
+{
+  "query": {
+    "bool": {
+      "filter": {
+        "range": { "age": { "gte": 8, "lte": 12 } }
+      }
+    }
+  }
+}
+```
+
+`gte`/`lte` are inclusive, `gt`/`lt` are exclusive — same four operators regardless of field type (numeric, date, or even `ip`). Wrapped in `bool.filter` here rather than bare `query.range` or `bool.must` because a range bound on its own carries no relevance signal — filter context skips scoring and is cacheable, matching the "exact criterion, not a ranked match" nature of the query.
+
+**`nested` query — querying inside a `nested` field without flattening cross-matches.** Needed whenever the field was mapped `"type": "nested"` (recall §5: `projects` is `nested` because each project needs to be matched as a self-contained unit, not as independently-matching arrays of names/roles).
+```json
+GET /employees/_search
+{
+  "query": {
+    "nested": {
+      "path": "projects",
+      "query": {
+        "bool": {
+          "must": [
+            { "match": { "projects.name": "Payments Platform" } },
+            { "match": { "projects.role": "Lead" } }
+          ]
+        }
+      },
+      "score_mode": "max",
+      "inner_hits": {}
+    }
+  }
+}
+```
+Without `nested`, a plain `bool`/`match` against `projects.name` and `projects.role` would match an employee if *any* project had the right name and *any* (possibly different) project had the right role — the classic "cross-object match" bug `nested` exists to prevent.
+
+**Making the bug concrete, a worked example.** Say one employee document has two projects:
+```json
+{
+  "name": "Priya",
+  "projects": [
+    { "name": "Payments Platform", "role": "Contributor" },
+    { "name": "Search Revamp",     "role": "Lead" }
+  ]
+}
+```
+Priya is a *Contributor* on Payments Platform and *Lead* on a different project (Search Revamp) — she is **not** the Lead of Payments Platform.
+
+If `projects` were mapped `"type": "object"` (the default) instead of `"nested"`, Lucene internally flattens arrays of objects into parallel arrays per field — `projects.name: ["Payments Platform", "Search Revamp"]` and `projects.role: ["Contributor", "Lead"]` — with no record of which name paired with which role. A plain query like:
+```json
+{
+  "query": {
+    "bool": {
+      "must": [
+        { "match": { "projects.name": "Payments Platform" } },
+        { "match": { "projects.role": "Lead" } }
+      ]
+    }
+  }
+}
+```
+would **wrongly match Priya**: `"Payments Platform"` is present *somewhere* in `projects.name`, and `"Lead"` is present *somewhere* in `projects.role` — the query has no way to check they came from the same array entry. That's the cross-object match bug.
+
+`"type": "nested"` fixes this by indexing each array entry as its own hidden Lucene document, so `name` and `role` stay bound together per entry. The same `nested` query shown above runs its inner `bool` against one entry at a time — against entry 1 (`name: "Payments Platform"`, `role: "Contributor"`) the `role: "Lead"` clause fails, and against entry 2 (`name: "Search Revamp"`, `role: "Lead"`) the `name` clause fails — so no single entry satisfies both clauses, and Priya is correctly excluded. Only an employee who is genuinely the Lead *of* Payments Platform (both fields matching within the same array entry) would match.
+
+**`multi_match` / `simple_query_string` — one query string across several fields.**
+```json
+GET /employees/_search
+{
+  "query": {
+    "multi_match": {
+      "query": "senior engineer",
+      "fields": ["designation^2", "department"]
+    }
+  }
+}
+```
+The `^2` boosts `designation` matches to twice the relevance weight of a `department` match in the same query — useful when one field is a stronger relevance signal than another.
+
+**Scroll API — deep pagination beyond `from`/`size`.** `from`/`size` breaks down past ~10,000 results (the `index.max_result_window` guard) because ES would have to rank and discard everything before `from` on every single page request. Scroll instead takes one consistent snapshot and hands back a cursor.
+```json
+POST /employees/_search?scroll=1m
+{
+  "size": 500,
+  "query": { "match_all": {} }
+}
+
+POST /_search/scroll
+{
+  "scroll": "1m",
+  "scroll_id": "<scroll_id from the previous response>"
+}
+```
+The tradeoff to know for interviews: scroll holds resources open server-side for its whole duration (point-in-time view of the index), so it's meant for bulk export/reindex jobs, not live user-facing pagination — `search_after` is the modern replacement for user-facing deep pagination because it's stateless (no server-side cursor to keep alive).
+
+### 7a. Case study — paginated search starts returning duplicate results
+
+**The scenario:** a user-facing feature pages through search results with plain `from`/`size` (page 1 = `from:0,size:20`, page 2 = `from:20,size:20`, ...), sorted by `updated_at`. After enough traffic, users start seeing the same record appear on two consecutive pages.
+
+**Root cause #1 — concurrent writes reorder the sort key mid-pagination.** `from`/`size` (and even `search_after`) re-runs the full query on every page call; there's no snapshot in between. If a document's `updated_at` changes between page 1 and page 2 (someone updates that record while the user is still reading page 1), it can shift position in the sort order and get pushed from "already shown" into the next page's window — the user sees it twice. This is a **consistency**, not a bug — ES isn't a transactional system and gives no cross-request pagination snapshot by default.
+- Fix options: use the **Point-in-Time (PIT) API** + `search_after` for a frozen, consistent view across the whole pagination session (`POST /index/_pit?keep_alive=1m`, then pass `pit.id` on every page request); or accept the tradeoff and dedupe client-side by ID across pages for feeds where staleness is tolerable.
+
+**Root cause #2 — tied scores reshuffle across shards on every call.** When many documents have the **identical relevance score** (common with `match_all`, or filter-only queries where nothing contributes to scoring), ES's only real tiebreaker is `_doc` order, which is **per-shard internal order** — and a distributed index spreads data across multiple shards. Two identical `from`/`size` requests can come back with hits re-interleaved differently shard-to-shard, which looks like duplicates/missing rows across pages even with nothing changing in the data.
+```json
+GET /employees/_search?preference=user-session-abc123
+{
+  "size": 20,
+  "from": 20,
+  "sort": [{ "updated_at": "desc" }]
+}
+```
+Setting **`preference`** to the same custom string (e.g. a session/request ID) on every page of one pagination session pins all of that session's requests to the **same set of shard copies** in the **same order**, removing the shard-routing-driven nondeterminism. It doesn't fix root cause #1 (concurrent writes) — it only makes the *shard-routing* part of result ordering deterministic across calls.
+
+**Related — scores and sort don't mix for free.** By default, specifying any explicit `sort` clause **disables score computation** (ES skips it as a performance optimization, since you asked it to order by something else). If you still need the relevance score visible/available alongside a custom sort (e.g. for debugging or display), opt back in explicitly:
+```json
+GET /employees/_search
+{
+  "track_scores": true,
+  "sort": [{ "updated_at": "desc" }],
+  "query": { "match": { "title": "engineer" } }
+}
+```
+Without `track_scores: true`, `_score` comes back as `null` whenever a sort is present.
+
+**Debugging tool — Explain API.** When a document unexpectedly does or doesn't show up in results (including these duplicate/missing-row pagination symptoms), the Explain API shows exactly how the scoring/matching decision was made for that one document against that one query:
+```
+GET /employees/_explain/1042
+{
+  "query": { "match": { "title": "engineer" } }
+}
+```
+It returns a breakdown of every clause that contributed (or didn't) to the match and score — the practical "why did/didn't this doc match" tool, as opposed to guessing from the aggregate result set.
+
+**Resolution — what actually shipped.** Two independent fixes, not one: (1) switched the pagination mechanism from `from`/`size` to **PIT + `search_after`**, so every page of a session reads off one consistent snapshot instead of re-querying the live index each time — this closed root cause #1. (2) added a stable `preference` value (the session ID already generated per pagination session) to every page request, so shard routing stopped reshuffling tied-score results — this closed root cause #2. `track_scores` and the Explain API weren't fixes in themselves; they were how the "same score across many docs" theory got confirmed before reaching for `preference` as the fix — worth saying out loud in an interview to show the diagnosis came before the patch, not a guess.
+
+**Aggregations — computing stats alongside the query, not after it.** The faceted-search row in §5 and these buckets are the same idea: one request, both the hits and the computed stats over the full matching set.
+```json
+GET /employees/_search
+{
+  "size": 0,
+  "query": { "term": { "department.keyword": "Engineering" } },
+  "aggs": {
+    "distinct_designations": { "cardinality": { "field": "designation.keyword" } },
+    "salary_stats": {
+      "stats": { "field": "salary" }
+    },
+    "salary_p95": {
+      "percentiles": { "field": "salary", "percents": [95] }
+    }
+  }
+}
+```
+`size: 0` is the tell that this request only cares about aggregation results, not the matching documents themselves — skipping hit retrieval/scoring entirely saves real work when you only need the numbers. `cardinality` is approximate (HyperLogLog++ under the hood, not an exact `COUNT(DISTINCT ...)`) — the accuracy/memory tradeoff is itself a common follow-up question.
+
+*(Custom analyzers and normalizers are covered in depth in §3a/§3b — not repeated here.)*

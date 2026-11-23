@@ -218,3 +218,44 @@ With a trace, go straight to that span's service and pull logs scoped to its tra
 ### 8.9 A Bicep deployment's `what-if` output shows a resource being deleted that you didn't expect — what does that usually mean, and how do you avoid it reaching prod?
 
 Most often it means the template's declared state no longer includes a resource that exists in Azure — someone (or a prior deployment) created it out-of-band, or a parameter/condition changed and silently dropped a resource block, and Bicep's reconciliation treats "not in the template" as "should not exist." The guard is exactly what `what-if` is for: run it as a required, reviewed gate in the pipeline *before* `deployment group create` applies anything, so an unexpected delete is caught in a PR/approval step rather than discovered after the resource is gone.
+
+### 8.10 Pod keeps restarting, but you don't immediately know why — what's the first thing you check, and what does each likely state actually mean?
+
+`kubectl describe pod` and `kubectl get pod -o wide` first, then logs — but interviewers are really listening for whether you can distinguish the *restart reasons*, because each implies a different fix:
+
+- **`CrashLoopBackOff`** — the container process itself exits (uncaught exception at startup, bad config, failed DB connection at boot). Fix is in application logs, not Kubernetes.
+- **`OOMKilled`** — the container hit its memory *limit* and the kernel's cgroup OOM killer terminated it; this is a hard kill, not a graceful shutdown, so `SIGTERM` handlers never ran. Fix is raising the limit or finding the actual leak/misconfigured heap size (`-Xmx` set too close to or above the container limit is the classic JVM version of this).
+- **`ImagePullBackOff`** — registry auth, wrong tag, or network policy blocking the node from reaching the registry; nothing to do with the app code at all.
+- **Liveness probe failure** (pod shows `Running` but restarts anyway, no crash in logs) — the app is alive but the *probe* can't get a timely 200, often because the probe hits an endpoint doing real work (DB health check) that's slow under load, so Kubernetes kills a pod that was actually fine, just momentarily slow.
+
+Being able to name which log/describe output narrows which of these it is — rather than "I'd check the logs" as a generic answer — is the actual signal interviewers are probing for.
+
+### 8.11 What's the difference between a liveness probe, a readiness probe, and a startup probe — and what happens if you get one wrong?
+
+- **Readiness** — "can this pod take traffic *right now*?" Failing readiness removes the pod from the Service's endpoint list (no traffic routed to it) but does **not** restart it — used for transient conditions like warming a cache or a dependency being briefly unavailable.
+- **Liveness** — "has this pod gotten into a state it can't recover from on its own?" Failing liveness **kills and restarts** the container. Getting this wrong is a classic senior-level gotcha: pointing liveness at an endpoint that calls a downstream dependency means a downstream outage causes Kubernetes to restart *every* pod of your app in a cascading loop — the dependency being down doesn't mean your app is broken, so liveness should check the app's own ability to serve traffic, not its dependencies' health.
+- **Startup** — for apps with a slow boot (large Spring context, JVM warm-up, cache preload): suppresses liveness/readiness checks until the startup probe itself succeeds, so a legitimately slow-starting app isn't killed by liveness mid-boot before it ever got a chance to become healthy.
+
+A good interview answer explicitly calls out the readiness-vs-liveness distinction as the one engineers get backwards most often, since pointing liveness at a dependency check is a very real production incident shape, not a theoretical trap.
+
+### 8.12 What actually happens when you set resource `requests` and `limits` on a pod, and why does getting `requests` wrong hurt more than getting `limits` wrong?
+
+`requests` is what the scheduler uses to **place** the pod — it finds a node with that much CPU/memory still unallocated and reserves it, regardless of actual usage. `limits` is enforced at runtime by cgroups — CPU gets throttled past the limit (slower, not killed), memory past the limit gets the process `OOMKilled` (hard-killed, not throttled — there's no "slow down" option for memory).
+
+Under-requesting is the subtler failure: if requests are set far below real usage "to fit more pods per node," the scheduler happily overcommits the node, and under real load every pod on that node is fighting for the same physical CPU/memory the node doesn't actually have free — a noisy-neighbor problem the scheduler had no way to see coming, because it only ever looked at `requests`. This is also why a `QoS: Guaranteed` pod (requests == limits) is the most protected class during node pressure/eviction, `Burstable` (requests < limits) is next, and `BestEffort` (no requests/limits set at all) is evicted first.
+
+### 8.13 What's a PodDisruptionBudget (PDB), and why does an app team need to own one even though cluster upgrades are Azure's job?
+
+A PDB declares the minimum pods of a Deployment that must stay available during a **voluntary** disruption — node drains for a cluster/node-pool upgrade, cordoning a node for maintenance, cluster autoscaler scaling a node down. Without a PDB, Kubernetes is free to drain several replicas of your Deployment at once during an AKS node-image upgrade, and if that coincides with your own rolling deployment or a low replica count, you can genuinely lose all serving capacity for a window — even though "upgrading the cluster" is squarely Azure's managed responsibility, *protecting your own app's availability during that upgrade* is the app team's job via a PDB, not Azure's.
+
+### 8.14 How would a senior engineer reason about multi-AZ/zone resilience for an AKS-hosted service, beyond "just add more replicas"?
+
+More replicas alone doesn't buy zone resilience if the scheduler happens to place them all on nodes in the same availability zone — a single zone outage still takes the whole app down. The actual mechanism is a **pod topology spread constraint** (or anti-affinity against the `topology.kubernetes.io/zone` label) telling the scheduler to spread replicas across zones, combined with the node pool itself actually spanning multiple AZs (an AKS node pool can be zone-redundant). It's also worth knowing the limit of this: zone spread protects against an infrastructure-level outage, not an application-level bad deploy — a bad rollout crashes pods in every zone equally, which is a separate problem (canary/rolling strategy, §8.6) that zone spread does nothing for.
+
+### 8.15 A ConfigMap backing an app's config was updated, but the running pods are still using the old values — why, and how do you fix it?
+
+Kubernetes doesn't restart pods automatically when a ConfigMap changes (not even when it's mounted as a volume — a mounted ConfigMap *does* eventually sync to the pod's filesystem, but the app only picks up new values if it re-reads the file, which most Spring Boot apps don't do without `@RefreshScope`/`spring-cloud-config` wired in; env-var-injected ConfigMap values never update at all until the pod restarts, since env vars are fixed at container start). The practical fix most teams use is forcing a rollout on config change — a Helm chart commonly hashes the ConfigMap content into a pod template annotation so any content change forces a new pod spec hash and therefore a rolling restart, rather than relying on the app to hot-reload.
+
+### 8.16 What's the difference between a `Deployment`, a `Service`, and an `Ingress` — and where does an Azure Application Gateway or AGIC fit in?
+
+A **Deployment** manages pod replicas and rollout strategy. A **Service** gives those (ephemeral, IP-changing) pods a stable virtual IP/DNS name and load-balances across whichever pods currently match its label selector — internal-only by default (`ClusterIP`), or externally reachable via `LoadBalancer`/`NodePort`. An **Ingress** is a layer-7 (HTTP/HTTPS) routing rule set — host/path-based routing, TLS termination — that needs an **Ingress Controller** actually running in the cluster to do anything; AGIC (Application Gateway Ingress Controller) is Azure's option that uses an Application Gateway as that controller, versus the more common NGINX ingress controller which is just another set of pods in the cluster. The senior-level distinction to have ready: a `Service` alone can expose one app externally with its own IP, but Ingress is what lets many services share one external IP/load balancer with host/path-based routing — without it, every externally-facing Service needs its own cloud load balancer, which gets expensive and unwieldy past a handful of services.

@@ -21,6 +21,18 @@ Related: [Spring Data](../spring/Spring-Data-Notes.md) (transactions, repositori
 
 **Two-level caching** (L1 in-process + L2 distributed) is a legitimate real pattern — Caffeine as a short-TTL L1 in front of Redis as L2 — to shave the network hop for very hot keys, accepting a short window of cross-pod staleness on just those keys.
 
+**Stacking two `@Cacheable` annotations for L1 + L2 (Ehcache + Redis) — yes, order matters, and there's a gap.** `@Cacheable` isn't `@Repeatable`, so two of them on one method need `@Caching`, each pointed at a different `cacheManager`:
+```java
+@Caching(cacheable = {
+    @Cacheable(cacheNames = "products-l1", cacheManager = "ehCacheManager", key = "#id"),
+    @Cacheable(cacheNames = "products-l2", cacheManager = "redisCacheManager", key = "#id")
+})
+public Product findById(Long id) { ... }
+```
+On a **read**, Spring checks the caches in the order the `@Cacheable` entries are declared — L1 (Ehcache) first, then L2 (Redis) — and returns on the first hit, short-circuiting the rest. So yes, order matters: list the fastest/local cache first, or every call pays the Redis round trip even when a hit is sitting one line later in declaration order. On a full **miss** (both L1 and L2 miss), the method runs once and the result is written into *both* caches.
+
+**The gap this doesn't cover:** if L1 misses but L2 hits — the common case right after a redeploy wipes the local Ehcache but Redis still has the value — Spring returns the L2 value *without writing it back into L1*. Write-back to earlier-listed caches only happens when the underlying method actually executes (a full miss), not when a later cache serves the hit. So until that key is naturally re-populated (next full miss) or evicted from Redis, every request on that pod keeps paying the Redis network hop for it — L1 never gets "warmed" from an L2 hit under plain `@Caching`. If true read-through promotion matters, the fix is a custom composite `org.springframework.cache.Cache` that wraps both delegates and performs the L1 write-back itself inside `get()` (registered as one `CacheManager`, so the method only needs a single `@Cacheable`), rather than relying on stacked annotations.
+
 ## 2. Redis data types — pick by access pattern, not by habit
 
 | Type | Use when | Example |
@@ -58,10 +70,33 @@ public Product update(Product product) { ... }
 public void delete(Long id) { ... }
 ```
 
+**`@Caching` — why it exists and when you actually reach for it.** `@Cacheable`, `@CachePut`, and `@CacheEvict` are **not** `@Repeatable`, so you can't stack two of the *same* annotation on one method directly. `@Caching` is the container annotation that groups multiple `cacheable`/`put`/`evict` operations — same type or mixed — onto a single method:
+
+```java
+@Caching(
+    put = {
+        @CachePut(cacheNames = "products", key = "#product.id")
+    },
+    evict = {
+        @CacheEvict(cacheNames = "products-by-category", key = "#product.categoryId"),
+        @CacheEvict(cacheNames = "products-search-results", allEntries = true)
+    }
+)
+public Product update(Product product) { ... }
+```
+
+Two distinct use cases show up in practice:
+
+- **Mixed operations, one method** (the classic case): an `update()` needs to refresh its own cache entry (`@CachePut`) *and* invalidate derived/secondary caches that are now stale (a category listing, a search-results cache) via `@CacheEvict` — different cache names, different semantics, can't express that with a single annotation.
+- **Same operation repeated across tiers**, e.g. the L1+L2 `@Cacheable` stacking from §1 above — multiple `@Cacheable` entries pointed at different `cacheManager`s so one method populates/reads both an in-process and a distributed cache.
+
+Without `@Caching`, the workaround is a separate helper method per cache operation, which is clunkier and splits what's logically one unit of work across the call stack.
+
 **Traps that come up in interviews:**
 
 - **Self-invocation bypasses the cache**, same root cause as `@Transactional` — these are proxy-based AOP. Calling `this.findById(id)` from another method in the same bean skips the proxy, so no cache check happens.
 - **Key design matters.** The default key generator combines all method args; an overload with the same effective lookup but different parameter order/count silently gets a different key. Use explicit `key = "#id"` (SpEL) for anything non-trivial.
+- **A `null` *key* is not the same question as a `null` *value* — and most providers don't tolerate it.** If `#id` evaluates to `null` (e.g., `@Cacheable(key = "#id")` called with `id == null`, or `SimpleKeyGenerator` with a single null arg), Spring doesn't special-case it — it passes `null` straight through to the backing `Cache.get(key)`/`put(key, value)`. `ConcurrentMapCache` and Caffeine are backed by a `ConcurrentHashMap`, which **throws `NullPointerException` on a null key** — it doesn't silently skip the cache or store it as a sentinel. `RedisCache` is just as bad in a different way: the key gets turned into `cacheName::` + the key's serialized form, and serializing/`toString()`-ing a `null` typically blows up before a request ever reaches Redis. Net effect: a null key is a hard failure, not a graceful cache-miss — guard it explicitly (`condition = "#id != null"` on the annotation, or validate before the call) rather than assuming the cache layer degrades gracefully.
 - **`@Cacheable` on a method that can legitimately return `null`** needs `unless = "#result == null"` or you'll permanently cache the miss (depending on provider null-handling) and never retry.
 - **Exceptions are not cached** by default — a failed call doesn't populate the entry, so the next call retries the method. That's usually what you want, but it also means a failing downstream dependency gets hammered repeatedly if callers retry in a tight loop; pair with a circuit breaker if that's a risk.
 
@@ -73,6 +108,22 @@ These solve different problems and are commonly used **together**, not as altern
 - **Spring Data Redis** (`RedisTemplate`/`ReactiveRedisTemplate`, repositories) is for when Redis **is** the primary data store or you need direct access to its data structures — ZSet-based leaderboards, pub/sub, distributed locks, rate limiters. You can't express "give me the top 10 by score" through `@Cacheable`; that needs direct `RedisTemplate.opsForZSet()` access.
 
 **Practical rule of thumb:** if you're caching the output of a DB query/computation, reach for `@Cacheable`. If Redis itself holds data with structure you need to query (ranked, set membership, counters), use `RedisTemplate` directly.
+
+**"Just annotate and the object gets serialized" — correct, but that's exactly the abstraction's blind spot.** `RedisCacheManager` stores every `@Cacheable` result as a single opaque blob (Redis `String` type) under a key like `cacheName::key`; it never touches Redis's native `Hash`/`List`/`Set`/`ZSet` structures. Concretely:
+- **Serializer matters and isn't automatic by default.** Spring Boot's default value serializer is JDK Java serialization (`SerializationPair.fromSerializer(JdkSerializationRedisSerializer)`) — binary, not human-readable in `redis-cli`, and brittle across class changes. Most setups override it to `GenericJackson2JsonRedisSerializer` so the blob is JSON:
+```java
+@Bean
+public RedisCacheConfiguration cacheConfiguration() {
+    return RedisCacheConfiguration.defaultCacheConfig()
+        .serializeValuesWith(SerializationPair.fromSerializer(new GenericJackson2JsonRedisSerializer()))
+        .entryTtl(Duration.ofMinutes(10));
+}
+```
+- **No partial updates, no atomic ops.** Because the whole object is one serialized value, there's no way to bump a counter field or push onto a list inside it without read-serialize-deserialize-modify-write the entire blob yourself — the moment you need that, you're back to `RedisTemplate.opsForValue()/opsForHash()/opsForZSet()` directly, outside the annotation.
+- **TTL is per cache name, not per key**, configured via `RedisCacheConfiguration.entryTtl(...)` (or per-cache overrides in a `Map<String, RedisCacheConfiguration>` passed to the `RedisCacheManager` builder) — you can't give one specific key a different TTL than its siblings through the annotation alone.
+- **`@CacheEvict(allEntries = true)` works but isn't free** — since there's no native grouping, `RedisCacheManager.clear()` does a `SCAN` for the `cacheName::*` key pattern and deletes matches; fine at normal scale, but worth knowing it isn't an O(1) "drop collection" like a Mongo/SQL table truncate.
+
+So yes — for plain request/response caching you genuinely never need to think about Redis data types. The moment the ask becomes "rank these", "atomically increment", "intersect these sets", or "give me field-level TTL", that's the signal to drop to `RedisTemplate` for that specific need rather than fighting the annotation.
 
 ## 5. Eviction policies and cache patterns
 
@@ -89,6 +140,26 @@ These solve different problems and are commonly used **together**, not as altern
 
 Pick `volatile-*` policies when some keys must never be evicted (e.g., session data vs. disposable query-result cache sharing one Redis instance) — set a TTL only on the evictable ones.
 
+**Your understanding is correct — through `@Cacheable`, TTL is set per cache name, not per key.** As noted in §4, `entryTtl(...)` lives on a `RedisCacheConfiguration`, and one `RedisCacheConfiguration` backs one *cache name* — every key written under that cache name gets the same TTL (or no TTL, if you never call `.entryTtl(...)`). So to get the "session data has no TTL, query-result cache does" mix above while staying inside the abstraction, you don't set TTL per key — you register **two different cache names**, each with its own config, on the same `RedisCacheManager`:
+
+```java
+@Bean
+public RedisCacheManager cacheManager(RedisConnectionFactory cf) {
+    RedisCacheConfiguration noTtl = RedisCacheConfiguration.defaultCacheConfig(); // never expires
+    RedisCacheConfiguration shortTtl = RedisCacheConfiguration.defaultCacheConfig()
+        .entryTtl(Duration.ofMinutes(5));
+
+    return RedisCacheManager.builder(cf)
+        .withInitialCacheConfigurations(Map.of(
+            "sessions", noTtl,       // keys: sessions::<id> — no TTL, never auto-expires
+            "searchResults", shortTtl // keys: searchResults::<id> — 5 min TTL
+        ))
+        .build();
+}
+```
+
+Both caches live in the same Redis instance; `sessions::*` keys have no TTL so `volatile-lru`/`volatile-ttl` skip them under memory pressure, while `searchResults::*` keys do have a TTL and are fair game. The one thing you genuinely **can't** do through the annotation is give two keys *within the same cache name* different TTLs — that requires dropping to `RedisTemplate.opsForValue().set(key, value, Duration.ofMinutes(n))` directly, bypassing `@Cacheable` for that specific write.
+
 **Cache-aside (lazy loading)** — the dominant pattern with `@Cacheable`: app checks cache, falls back to DB on miss, writes result back. Simple, but the first request after an eviction always pays full DB latency ("cold cache" / thundering-herd risk if many requests miss simultaneously — mitigate with request coalescing or a short lock around the DB fill).
 
 **Write-through** — write goes to cache and DB together (or cache fronts the DB entirely); reads are always a cache hit after the first write. More consistency guarantee, more write-path complexity.
@@ -101,6 +172,7 @@ Redis offers both durability options; which one matters depends on what's cached
 
 - **RDB** (point-in-time snapshot) — compact, fast restart, but can lose writes since the last snapshot.
 - **AOF** (append-only log of writes) — more durable, replayable, larger file, slower restart.
+- **Defaults:** stock open-source Redis ships with **RDB enabled, AOF disabled**. The default `redis.conf` has `save` directives wired in out of the box (e.g. `save 3600 1`, `save 300 100`, `save 60 10000` — snapshot if N seconds passed and at least M keys changed), so an unconfigured Redis is already snapshotting periodically; `appendonly` defaults to `no`. Managed services differ: Azure Cache for Redis only exposes persistence (RDB or AOF, your choice) on **Premium+** tiers — Basic/Standard have none; AWS ElastiCache enables snapshotting by default on replication groups but it's tunable/disable-able per cluster.
 - For most **caching** use cases (not primary-store use cases), durability is a secondary concern — a cold cache after a restart is a performance hit, not data loss, since the source of truth is the DB. Durability matters far more when Redis holds data with no other system of record (session store, rate-limit counters you can't afford to reset).
 
 **Replication/Sentinel/Cluster** — in practice you consume these as managed infrastructure (Azure Cache for Redis, AWS ElastiCache) configured declaratively, not hand-rolled:
@@ -128,7 +200,42 @@ When Redis needs to do more than store a method's return value — ranked querie
 
 ### 7.5 Your app's Redis cluster goes down. What happens to the app?
 
-Depends entirely on how the cache-aside fallback is written. If `@Cacheable` wraps a method that queries the DB, a `RedisConnectionFailureException` from the cache layer should not take down the whole request — either let Spring Cache's error handling fail open to the underlying method (the default behavior for most Spring Boot auto-configured `CacheErrorHandler`), or implement a custom `CacheErrorHandler` that logs and falls through to the DB rather than propagating. The DB then absorbs full load with no cache cushioning — size connection pools and expect latency to rise, but the app should still serve correct (just slower) responses, not 500s.
+**Correction to a common assumption:** the *actual* Spring default is **not** fail-open. Spring's out-of-the-box `CacheErrorHandler` is `SimpleCacheErrorHandler`, and its own Javadoc says it plainly — "a simple `CacheErrorHandler` that does not handle the exception at all, simply throwing it back at the client." So with no custom error handler configured (Spring Boot's cache auto-configuration doesn't supply one either), a `RedisConnectionFailureException` thrown while `@Cacheable` tries to `GET` from the cache propagates straight out of the aspect — the target method is **never invoked**, and the caller sees that exception (a 500, if nothing else catches it upstream). "Execute the underlying method" is the behavior you *want*, but you have to build it yourself.
+
+To get fail-open-to-DB behavior, register a custom `CacheErrorHandler` bean that logs (so the Redis outage is visible — silently swallowing it would otherwise hide a real incident) and simply returns instead of rethrowing:
+
+```java
+@Configuration
+public class CacheConfig implements CachingConfigurer {
+
+    private static final Logger log = LoggerFactory.getLogger(CacheConfig.class);
+
+    @Override
+    public CacheErrorHandler errorHandler() {
+        return new CacheErrorHandler() {
+            @Override
+            public void handleCacheGetError(RuntimeException ex, Cache cache, Object key) {
+                log.warn("Cache GET failed for cache={} key={}, falling through to method", cache.getName(), key, ex);
+                // no rethrow -> treated as a cache miss, method still runs
+            }
+            @Override
+            public void handleCachePutError(RuntimeException ex, Cache cache, Object key, Object value) {
+                log.warn("Cache PUT failed for cache={} key={}", cache.getName(), key, ex);
+            }
+            @Override
+            public void handleCacheEvictError(RuntimeException ex, Cache cache, Object key) {
+                log.warn("Cache EVICT failed for cache={} key={}", cache.getName(), key, ex);
+            }
+            @Override
+            public void handleCacheClearError(RuntimeException ex, Cache cache) {
+                log.warn("Cache CLEAR failed for cache={}", cache.getName(), ex);
+            }
+        };
+    }
+}
+```
+
+With that in place: the method runs against the DB on a cache GET failure (reads still succeed, just slower), writes/evicts are logged and dropped rather than crashing the write path, and — critically — none of it fails silently. The DB then absorbs full load with no cache cushioning, so size connection pools and expect latency to rise, but the app serves correct (just slower) responses instead of 500s. Without the logging, an ops team has no signal that Redis is down until latency/DB load alarms fire indirectly.
 
 ### 7.6 Why is `noeviction` risky as a default `maxmemory-policy`?
 
