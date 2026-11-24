@@ -11,6 +11,7 @@ Study sequence: [Core](Spring-Core-Notes.md) -> [Boot](Spring-Boot-Notes.md) -> 
 **Added foundation:**
 
 - JDBC is SQL-oriented access through drivers and connections.
+- In older code, `SimpleJdbcTemplate` is a historical Spring JDBC convenience API, not the current recommendation; use `JdbcTemplate` or `NamedParameterJdbcTemplate` as appropriate.
 - JPA/Jakarta Persistence is an ORM specification; Hibernate is a provider.
 - Spring ORM integrates resource management and transactions with persistence technologies.
 - Spring Data is a family of store-specific repository abstractions, not another name for JPA or Hibernate.

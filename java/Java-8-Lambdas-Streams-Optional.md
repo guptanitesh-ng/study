@@ -22,6 +22,8 @@ The full treatment — the diamond-style conflict between two default methods, r
 - A `static` interface method is a namespaced utility (`Notifier.isBlank(...)`); it is not inherited as an instance method by implementing classes.
 - A default method **cannot override** `Object`'s public methods (`equals`, `hashCode`, `toString`). Those always resolve to the class hierarchy's own definition or `Object`'s, never to an interface default, because every class already inherits a concrete `Object` implementation and a concrete method wins over a default.
 
+**Evolution example:** Java 8 added `List.sort` as a default, so existing list implementations inherited a general sorting implementation without each implementing the new method. `ArrayList` overrides it with an implementation suited to its backing array. The interface supplies compatibility and common behavior; specialized implementations can still optimize while respecting the same contract.
+
 ## 2. Functional interfaces and lambda expressions
 
 ### Foundation: a lambda supplies one interface operation
@@ -89,6 +91,21 @@ Writing one inline lambda and processing it is the common case in real code. The
 - **`Optional` chains the same combinators as Streams**, just at cardinality 0/1: `map`/`filter`/`orElseGet` use `Function`/`Predicate`/`Supplier` identically to their Stream counterparts (see section 8).
 - **`CompletableFuture` repurposes them as async continuations** rather than data transforms: `thenApply(Function)`, `thenAccept(Consumer)`, `thenCompose(Function<T, CompletableFuture<R>>)`, `exceptionally(Function<Throwable, T>)`.
 - **Method references pay off most once you compose**, since a composed pipeline reads as a sequence of named operations rather than nested lambda bodies: `Function<String, Integer> parseAndDouble = ((Function<String, Integer>) Integer::parseInt).andThen(x -> x * 2);`.
+
+**Execute-around follow-up:** a callback can centralize a required acquire/release protocol while allowing callers to supply the work:
+
+```java
+static void withLock(java.util.concurrent.locks.Lock lock, Runnable work) {
+    lock.lock();
+    try {
+        work.run();
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+The `finally` releases the lock even if `work` throws, and the exception still propagates. The work executes while holding the lock: keep it short, avoid blocking I/O, and remember that a reentrant lock must be released by its owning thread. Don't return an asynchronous task and assume its later work is protected.
 
 ## 3. Checked exceptions inside lambdas
 
@@ -198,6 +215,17 @@ Do not use `peek` or other pipeline side effects for mandatory auditing: executi
 
 **Parallel stream scenario:** a shared `ArrayList` is mutated in `parallelStream().forEach`. This is a data race, not a faster collector. Prefer appropriate collectors/reduction, and measure.
 
+**Interview follow-up: "Why did parallelizing my ordered report make it slower?"** `distinct`, `sorted`, `skip` and `limit` are stateful: they can require buffering or coordination across partitions. On an ordered source, preserving the *first* matching values or the *first* distinct occurrence constrains what workers may return. `unordered()` removes the encounter-order requirement where it exists; it does not shuffle elements or guarantee a speedup, and changes the allowed result for operations such as `limit`. Only use it when *any* qualifying subset is acceptable.
+
+| Choice | What the caller can rely on | Trade-off |
+| --- | --- | --- |
+| `findFirst()` | First in encounter order when one exists | Preserving order can constrain parallel work |
+| `findAny()` | Any matching element; empty if none | Gives the implementation more freedom; it can still return the first |
+| `forEach()` | Each selected element is processed without encounter-order guarantees | Side effects may run concurrently; shared state needs protection |
+| `forEachOrdered()` | Actions follow encounter order if the stream has one | Coordination can limit parallel speedup; it does not impose an order on an unordered source |
+
+For numeric processing, `mapToInt`/`IntStream` can avoid boxing intermediate `Integer` values and provides `sum`, `average` and related operations. An `int` sum can still overflow; select an appropriate numeric type and measure with the real input, allocation rate and workload rather than assuming primitive streams or parallelism always win.
+
 **Deferred reading:** collection-specific stream integration (`Collectors`, grouping, partitioning) belongs with the separate collections study rather than this Java 8 language-feature guide.
 
 ## 6. `map` versus `flatMap`
@@ -216,7 +244,7 @@ class FlattenLines {
 }
 ```
 
-When the inner stream wraps a closeable resource (such as `Files.lines(path)`), `flatMap` does not automatically close it; track and close each opened resource explicitly, typically with try-with-resources around the line that opens it rather than inside the lambda alone.
+`flatMap` closes each mapped inner stream after consuming it, including an inner `Files.lines(path)` stream. If the **outer** stream itself owns a resource, close that outer stream with try-with-resources; terminal operations do not automatically close it. Do not close an inner stream inside the mapper before returning it, since `flatMap` still needs to consume it.
 
 ## 7. `reduce()`: three flavors
 
@@ -252,6 +280,8 @@ class ReduceFlavors {
 - **Identity + accumulator + combiner** supports changing the element type mid-reduction (accumulating `U` from `T` elements); the combiner is only invoked by a parallel stream to merge partial results and must be compatible with the accumulator's associativity, or a parallel run can produce a different answer than a sequential one.
 
 Prefer `Integer::sum`/`Double::sum` style method references over `(a, b) -> a - b` or other non-associative/non-commutative operations in `reduce`; subtraction-style reductions give order-dependent results that silently break under parallel execution.
+
+**Max/min identity trap:** `Stream.of(-8, -3).reduce(0, Integer::max)` returns `0`, which was not an input. Use `reduce(Integer::max)` or `max(Integer::compare)` and handle the empty `Optional`; alternatively use `Integer.MIN_VALUE` as a true identity for `max` only when that empty-stream result is appropriate. For `min`, the corresponding bound is `Integer.MAX_VALUE`; `0` is wrong for an all-positive input.
 
 ## 8. `Optional` models absence, not every failure
 

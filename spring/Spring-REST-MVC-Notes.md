@@ -638,6 +638,10 @@ Fielding's dissertation defines constraints (client-server, statelessness, cache
 
 **HATEOAS in practice:** Spring HATEOAS (`EntityModel`, `CollectionModel`, `linkTo().withSelfRel()`) makes level 3 straightforward to produce, but very few real APIs consume the links — client teams hardcode URLs anyway, and link payloads add size/versioning surface. **Interview-honest answer:** "I design to level 2 deliberately and can justify why level 3 is rarely worth it for an internal service with a single, coordinated client team; I'd reach for it for a public API where independent third-party clients benefit from discoverability and reduced URL coupling."
 
+**Appointment example:** a client discovers available slots, then submits a booking. Two clients may see the same slot; the server must enforce availability atomically and can return `409 Conflict` to the loser. A HATEOAS representation might expose `book` only for an available slot and `cancel` for an existing cancellable booking; links communicate possible transitions but do not eliminate races or replace authorization.
+
+**Resource paths:** `/customers/{id}/appointments` is useful for a customer-scoped collection; `/appointments/{id}` supports direct access without pretending an appointment has only one navigation context. For many-to-many relationships, a relationship resource such as `/courses/{id}/enrollments` can carry enrollment status and dates. Return explicit DTOs rather than serializing JPA entities: lazy loading, bidirectional cycles and accidental fields can otherwise change the public contract.
+
 **Common follow-up:** "Is a RESTful API required to be stateless?" Yes for the protocol-level constraint — no client session state is kept on the server between requests. That is compatible with a stateful *backing store* (a database); "stateless" describes the request/response contract, not business data persistence.
 
 ## 12. API versioning strategies

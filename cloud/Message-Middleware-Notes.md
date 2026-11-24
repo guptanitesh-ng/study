@@ -6,65 +6,113 @@ Reviewed: November 19, 2026. Source: personal JMS/MDB notes covering message ana
 
 Related: [Spring Boot](../spring/Spring-Boot-Notes.md) (where `@JmsListener`/`@KafkaListener` fit), [REST + MVC](../spring/Spring-REST-MVC-Notes.md#request-reply) (sync alternatives to request-reply messaging).
 
-## 1. JMS fundamentals, kept — these still get asked
+## 1. JMS and MDB fundamentals — mechanics behind the interview answer
 
-**Message anatomy** — this gets asked as "how would you debug a message that silently vanished / got processed twice," not as a trivia recitation: headers (`JMSDestination`, `JMSDeliveryMode`, `JMSMessageID`, `JMSTimestamp`, `JMSCorrelationID`, `JMSReplyTo`, `JMSRedelivered`), properties (app-defined, used by selectors), and body (`TextMessage`, `ObjectMessage`, `BytesMessage`, `MapMessage`, `StreamMessage`). The one header that actually earns its keep in production debugging is `JMSRedelivered` — if it's `true` on a message you're investigating, you immediately know the first attempt failed somewhere downstream (exception, timeout, crash) rather than the message being malformed from the start; that's the first thing to check before digging into business logic.
+### 1.1 Message anatomy and grouping
 
-**Acknowledgment modes** — the detail most Kafka-only candidates have never had to reason about:
+**Scenario: "Why did we process the same payment twice?"** A JMS message has **headers** such as `JMSMessageID`, `JMSCorrelationID`, `JMSReplyTo`, `JMSDeliveryMode`, `JMSExpiration`, `JMSPriority` and `JMSRedelivered`; application **properties** can carry routing metadata; the **body** holds the payload. `JMSRedelivered=true` suggests possible earlier delivery, not proof of where or why it failed. Inspect the business idempotency key, logs and `JMSXDeliveryCount` too: a consumer might have committed a database update and crashed before acknowledgment.
 
-| Mode | Behavior | Risk |
+Bodies include `TextMessage`, `BytesMessage`, `MapMessage`, `StreamMessage` and `ObjectMessage`. **Why avoid `ObjectMessage` across independently deployed services?** Java serialization couples both ends to compatible classes and object graphs; an agreed text or binary schema is often easier to evolve and use across languages. This is a trade-off, not a claim that only two JMS body types are valid. A received message's body and properties are read-only; `clearBody()` or `clearProperties()` clears the respective content before it can be rewritten.
+
+**Follow-up: "How do multiple consumers process each account's events in order?"** Set an account identifier in `JMSXGroupID`. For example, ActiveMQ Classic's message groups normally assign a group to one consumer while it stays alive; different groups can be processed in parallel, and a group can be reassigned after consumer failure. Classic can close a group with a negative `JMSXGroupSeq`. Verify the provider's grouping implementation and configuration, including failover, cache limits and application concurrency; the property alone is not a universal end-to-end ordering guarantee. Kafka keys serve a related purpose, but their partition and offset mechanics differ. [ActiveMQ Classic message groups](https://activemq.apache.org/components/classic/documentation/message-groups).
+
+**Topology follow-up: "Where does the broker run?"** An application server may host an embedded broker/provider, or its JMS resource adapter may connect to an external broker shared by several applications. In either case, producers send to a destination and the provider delivers to consumers such as MDBs; an MDB is not itself the broker. An embedded deployment couples broker lifecycle and capacity to the host; an external deployment adds network, independent operations and availability concerns. Neither placement alone guarantees persistence, atomicity or high availability—verify the actual storage, transaction and HA configuration.
+
+### 1.2 Acknowledgment and MDB transaction boundaries
+
+For a **plain, non-transacted JMS session**, no-argument `connection.createSession()` defaults to `AUTO_ACKNOWLEDGE`; an explicitly selected mode overrides it. The table describes JMS session behavior, not every listener container:
+
+| Mode | When it takes effect | Failure / trade-off |
 |---|---|---|
-| `AUTO_ACKNOWLEDGE` | Session acks automatically after `onMessage`/`receive()` returns | Message is lost if the process crashes *after* ack but before your work is durably done |
-| `CLIENT_ACKNOWLEDGE` | You call `message.acknowledge()` explicitly, acks *all* messages received so far on that session | Coarse — one missed ack call can re-deliver a whole batch |
-| `DUPS_OK_ACKNOWLEDGE` | Lazy, batched acks — broker may redeliver on failure | Explicit at-least-once; your consumer must be idempotent |
-| `SESSION_TRANSACTED` | Acks and any other transactional work commit/rollback together | Full atomicity, at the cost of throughput |
+| `AUTO_ACKNOWLEDGE` | After synchronous `receive()` returns, or after a standard asynchronous JMS listener returns successfully | For `receive()`, application processing happens **after** acknowledgment; a crash before its durable side effect can lose work. |
+| `CLIENT_ACKNOWLEDGE` | `message.acknowledge()` acknowledges all messages consumed so far in that session | Acknowledgment is session-scoped, not just for that message; unacknowledged work can be redelivered. |
+| `DUPS_OK_ACKNOWLEDGE` | Provider may acknowledge lazily | Redelivery and duplicates are possible; make processing idempotent. |
+| Transacted session (`SESSION_TRANSACTED`) | Consumed messages and sends in the JMS transaction commit or roll back together | A separate database is not automatically enlisted; rollback can cause redelivery. |
 
-**MDB container-managed transactions:** a message-driven bean with `TransactionAttributeType.REQUIRED` runs inside a container-started JTA transaction. An **unchecked exception** propagating out of `onMessage` marks the transaction for rollback — the message is **not deleted**, it goes back to the queue for redelivery (up to a redelivery-limit/DLQ policy). `NOT_SUPPORTED` means no container transaction — you handle your own ack/rollback, and a failure just loses the message unless you've coded recovery yourself. This container-managed "exception = automatic redelivery" behavior is the single biggest mental model Kafka does **not** replicate (see §3).
+**MDB interview follow-up: "Is `AUTO_ACKNOWLEDGE` the default?"** It is a common activation setting for non-transactional delivery, but the effective behavior depends on transaction configuration:
 
-**Persistent/durable matrix:**
+- **Container-managed `REQUIRED`** is the normal EJB 3+ default. The container starts a JTA transaction around message consumption and `onMessage`; successful commit acknowledges consumption. A rollback, for example after an unchecked exception escapes, makes the message eligible for redelivery under the provider's policy. A database participates atomically only if it and the messaging resource are properly enlisted, commonly via XA.
+- **Container-managed `NOT_SUPPORTED`:** no container-managed JTA transaction surrounds the listener. Non-transactional acknowledgment and failure behavior depend on the container/provider; don't assume that every failure either loses or redelivers the message. IBM documents syncpoint-dependent outcomes for WebSphere/MQ.
+- **Bean-managed:** a user transaction started *inside* `onMessage` does not include receipt of that incoming message. Do not assume it makes receipt and the database update atomic.
 
-| | Non-persistent | Persistent |
+**Concrete failure:** an MDB writes a payment row then crashes. With correctly enlisted XA resources and rollback, both consumption and the database update roll back. Without a shared transaction, the row can commit while the message is redelivered, so an idempotency key protects the business operation. Catching an exception and returning normally can also let a transaction commit unless it is marked rollback-only; a DLQ/redelivery limit must be configured and verified.
+
+**Spring distinction:** Spring Boot's auto-configured `@JmsListener` factory is transactional by default (JTA when available, otherwise a transacted JMS session); a custom factory can differ. A non-transacted Spring `DefaultMessageListenerContainer` using `AUTO_ACKNOWLEDGE` acknowledges before listener execution, unlike a standard JMS asynchronous callback. [Spring Boot JMS](https://docs.spring.io/spring-boot/reference/messaging/jms.html) · [Spring listener container](https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/jms/listener/AbstractMessageListenerContainer.html) · [IBM MDB transactions](https://www.ibm.com/docs/ro/was-nd/8.5.5?topic=retrieval-message-driven-beans-transaction-support).
+
+### 1.3 Persistent messages vs. durable subscriptions
+
+**Question: "The consumer was down during an outage. Will it get the message?"** Persistence is a **message delivery mode**; durability is a **topic subscription** property. Neither is the same as a consumer acknowledgment.
+
+| Destination / subscription | `NON_PERSISTENT` | `PERSISTENT` |
 |---|---|---|
-| **Queue** | Lost on broker restart, still delivered once to one consumer | Survives restart, still delivered once to one consumer |
-| **Topic (non-durable sub)** | Lost if subscriber isn't connected when sent | Still lost if subscriber isn't connected — non-durable means no backlog, period |
-| **Topic (durable sub)** | N/A in practice | Broker retains for the subscriber until it reconnects and consumes |
+| Queue | May be held for an offline consumer but can be lost on provider failure | Intended to survive provider failure with correctly configured durable storage; retained pending consumption, expiry or policy |
+| Non-durable topic subscription | No backlog while the subscription is inactive | Persistence doesn't create an offline subscription backlog |
+| Existing durable topic subscription | Delivery while inactive or after provider failure is not guaranteed | Matching messages can be retained while inactive, subject to expiry, deletion and provider/storage policies |
 
-**Request-reply pattern:** requester sets `JMSReplyTo` to a temporary (or well-known) destination and `JMSCorrelationID` to a unique value; the responder reads the request, writes the reply to `JMSReplyTo` with the same `JMSCorrelationID` copied in; requester filters its reply consumer with a selector on that correlation ID. This is genuinely awkward over a queue/topic model — it's solving an RPC problem with a fire-and-forget transport.
+A durable subscription must already exist when messages are published; it isn't a replay of earlier topic history. Persistent delivery is not a guarantee of exactly-once **business processing**: redelivery after an unacknowledged side effect is possible. Check expiration, storage, HA and broker limits rather than assuming “persistent” solves every failure.
 
-**Message selectors:** SQL-92-like filter expressions evaluated against message *properties* (never the body) at the broker, so non-matching messages are never delivered to that consumer. Cost: the broker evaluates the selector per message per subscriber — cheap for a few consumers, a real scaling concern with many selector-based consumers on one busy destination (broker CPU scales with consumer count × selector complexity).
+### 1.4 Request–reply, temporary destinations and correlation
 
-**JMS 2.0 additions worth naming:** delivery delay (`setDeliveryDelay`), shared (non-durable and durable) subscriptions so multiple consumers can load-balance a topic subscription, simplified API (`JMSContext`), async send, and `JMSXDeliveryCount` property to inspect redelivery attempts without rolling your own counter.
+**Scenario:** an online service sends a request and needs its corresponding response. It sets `JMSReplyTo` to either a known reply queue or a temporary queue; the responder sends there. One correlation convention is to put an application-generated ID in the request's `JMSCorrelationID` and copy it to the reply. Another is to copy the request's `JMSMessageID` into the reply's `JMSCorrelationID`. On a shared reply queue, a selector or application-side dispatcher can match replies to pending requests; a selector per request is not mandatory.
 
-**Anti-patterns (still correct under Kafka, by the way):**
-- **Single-purpose queue/topic** — don't multiplex unrelated message types onto one destination and rely on consumers to filter; it couples unrelated schemas and makes selective scaling impossible.
-- **Priority overuse** — JMS priority levels are a broker-side scheduling hint, not a strict guarantee, and heavy reliance on them usually masks a capacity problem. (Kafka doesn't even offer this knob — see §3.)
-- **Header misuse** — properties/headers are for routing and filtering metadata, not a place to smuggle business payload that belongs in the body.
+A temporary queue/topic belongs to its creating connection and disappears when deleted or the connection closes; only consumers on that connection can consume from it, while other clients can send to it using `JMSReplyTo`. A known reply queue survives connection loss according to its configuration but needs correlation and cleanup. The legacy `QueueRequestor` hides temporary-queue setup, but its `request()` has no timeout argument; assess that limitation rather than waiting indefinitely. Even with an explicit timeout, the request might still execute later—retry safely with an idempotency key.
+
+### 1.5 Selectors, backlog and queue design
+
+Selectors use a SQL-like expression on eligible JMS headers and message properties, not the body. For example, a consumer selector `orderType = 'ONLINE'` matches an application property. On a queue, messages that match no available consumer can remain pending until an eligible consumer arrives, they expire, or policy handles them; a missing property can make a selector evaluate as unknown.
+
+**Scenario:** 400 batch book orders are ahead of an online order. A single shared queue and listener pool can delay the online customer even though the message schemas are identical. Separate queues and independently sized consumers can isolate the workloads; a shared queue with selectors offers consumer-controlled filtering and may reduce producer routing knowledge, but adds selector and backlog management. Provider implementation, queue depth and selectors affect performance—measure on the actual broker rather than assuming a universal CPU formula.
+
+**Why not just set priority?** A high-priority message cannot preempt workers already processing low-priority work, and JMS priority is not a strict scheduling guarantee. Use separate capacity where latency isolation matters. A `QueueBrowser` lets operators inspect messages without consuming them, but it is not a transactionally consistent or necessarily static snapshot.
+
+### 1.6 Expiration, priority and API evolution
+
+**Common bug:** setting `message.setJMSExpiration(...)` or `setJMSPriority(...)` before sending can be overwritten by the provider. Set **time-to-live** and priority on the producer or on the send operation instead. For example, in the JMS 2.0 simplified API:
+
+```java
+context.createProducer()
+       .setTimeToLive(30_000) // milliseconds; 0 means no expiration
+       .setPriority(9)
+       .send(queue, body);
+```
+
+The provider calculates `JMSExpiration` from TTL and the send time; for a transacted send, that is not necessarily the commit time. A message can therefore expire while waiting for commit or a consumer. Confirm expiry handling and DLQ policy with the provider.
+
+**JMS 2.0 additions:** delivery delay, shared durable and non-durable subscriptions, the `JMSContext` simplified API, asynchronous send in supported environments, and mandatory provider support for `JMSXDeliveryCount`. Modern Jakarta Messaging uses `jakarta.jms`; older JMS applications use `javax.jms`. [Jakarta Messaging specification](https://jakarta.ee/specifications/messaging/3.0/jakarta-messaging-spec-3.0.html).
+
+**Shared-subscription follow-up:** billing and analytics each need their own copy of an event, while billing needs multiple workers. Give each system its own subscription and let billing workers share its subscription: workers compete for billing's copy, not one copy per worker. Make the subscription durable and provision it before publication if offline retention is required; expiration, broker policy and failures still apply. A non-durable shared subscription does not provide an offline backlog after all its consumers disconnect.
+
+**Async-send follow-up:** a successful return from the call does not mean the send has completed; use the `CompletionListener` success/failure callback and don't mutate or reuse the message before completion. Check the specification and container/provider restrictions before using asynchronous send in managed environments; commit/close and failure handling still matter.
 
 ## 2. ActiveMQ virtual topics vs. composite destinations
 
-This is the kind of detail a vendor-agnostic Kafka-only candidate can't answer, so it's worth having ready as a "here's something specific I've actually operated" moment — the scenario that surfaces it in an interview is "a new consumer team needs a copy of every order event, how do you add them without touching the producer or redeploying anything":
+This is the kind of detail a vendor-agnostic Kafka-only candidate can't answer, so it's worth having ready as a "here's something specific I've actually operated" moment — the scenario that surfaces it in an interview is "a new consumer team needs a copy of future order events, how do you add them without touching the producer or redeploying anything":
 
-- **Virtual topic:** producer sends once to a topic; ActiveMQ fans it out to per-consumer backing queues (`Consumer.A.VirtualTopic.Foo`, `Consumer.B.VirtualTopic.Foo`, ...) automatically as consumers subscribe — dynamic, broker-managed fan-out, each consumer gets queue semantics (durable, competing-consumer-safe) without a durable topic subscription. Answer to the scenario above: the new team just starts a consumer on `Consumer.NewTeam.VirtualTopic.Orders` — zero producer-side change.
-- **Composite destination:** producer is configured to send to a *static*, pre-declared list of destinations in one send call — fan-out is fixed at config time, not driven by who's currently subscribed. Same scenario here means editing the producer's destination config and redeploying it — the trade-off an interviewer is really probing for.
+- **Virtual topic:** producer sends once to a topic; ActiveMQ fans it out to per-system queues (`Consumer.A.VirtualTopic.Foo`, `Consumer.B.VirtualTopic.Foo`, ...) — dynamic, broker-managed fan-out, with competing consumers sharing each queue. A new team can create its queue without changing the producer; the queue must exist when a message is published to receive its copy.
+- **Composite destination:** a *static*, explicitly configured list of destinations receives copies of a send. The mapping can be configured at the producer or on the broker; adding a destination requires changing that mapping, not necessarily redeploying the producer.
 
-The practical difference: virtual topics scale with consumers joining/leaving at runtime; composite destinations are simpler to reason about but require a config change (and often a redeploy) to add a new fan-out target.
+The practical difference: virtual topics allow new system queues to be added under the naming convention; composite destinations require an explicit mapping change.
+
+**Relevance today:** virtual topics are less essential for new JMS 2.0 designs: a regular topic with a separate shared durable subscription per system can provide fan-out, offline retention and competing consumers. Virtual topics remain useful in existing ActiveMQ Classic deployments or when teams specifically want queue-based operations and semantics. They are an ActiveMQ-specific option, not a requirement for topic fan-out.
 
 ## 3. The JMS -> Kafka bridge — concept by concept
 
-| You know (JMS/MQ) | Kafka equivalent | The difference that actually bites |
+| You know (JMS/MQ) | Kafka comparison | The difference that actually bites |
 |---|---|---|
-| Queue (point-to-point, one consumer gets each message) | One consumer group on a topic | Kafka achieves "only one gets it" via consumer-group partition assignment, not broker-side delivery tracking — the message itself isn't removed from the log |
-| Topic (pub-sub, every subscriber gets every message) | Multiple consumer groups reading the same topic | Each group independently tracks its own offset; the log is the same, "pub-sub" is just "more than one group reading it" |
-| Durable topic subscription | Consumer group with committed offsets + retention window | Kafka retains by time/size regardless of consumption — there's no "has anyone consumed this yet" bookkeeping at the broker |
-| `AUTO_ACKNOWLEDGE` | `enable.auto.commit=true` | Same risk shape: commit can happen before your processing is durably finished -> silent loss on crash |
-| `CLIENT_ACKNOWLEDGE` | Manual synchronous `commitSync()` after processing | Commit the offset only after your side-effect is durable — same discipline, different API |
-| `SESSION_TRANSACTED` | Kafka transactions (idempotent producer + `transactional.id` + `read_committed` consumers) | Conceptually similar atomicity goal, very different mechanics (producer epoch fencing, not a 2PC-style JTA transaction) |
-| MDB auto-redelivery on unchecked exception | **Nothing automatic** — you must not commit the offset, then re-process or route to a retry/DLQ topic yourself | This is the biggest trap: assuming Kafka "just redelivers like my MDB did" — it does, but only because you didn't advance the offset, and only up to however many `poll()` cycles you choose to retry before giving up |
-| Message selector (broker-side filter) | No broker-side filter | Filter client-side after consuming, or design topic/partition-key layout so routing happens through the key instead of a filter expression |
-| Persistent message, delivered once | The log itself, replayable by any consumer that resets its offset | Kafka's default mental model is "replay any time," which is the opposite of "delete on ack" |
-| JMSReplyTo/CorrelationID request-reply | A reply-topic + correlation-id header, built by hand | Kafka isn't built for RPC; if you truly need request-reply, a REST/gRPC call is usually the right tool, not Kafka |
-| Virtual topic (dynamic fan-out to per-consumer queues) | Multiple consumer groups on one topic | Same intent (let N independent consumers each see everything), Kafka does it natively without extra broker config |
-| Message priority | **Not supported** | Ordering is partition-only in Kafka; if priority matters, route high-priority messages to a separate topic/partition instead |
+| Queue with competing consumers | One consumer group on a topic | A partition is assigned to one group member at a time; retries/rebalances can still repeat processing. The log isn't removed on acknowledgment. |
+| Topic subscriptions / virtual-topic queues | Multiple consumer groups | Each group maintains an independent position; records are available only within the topic's retention and compaction rules. |
+| Durable subscription | Group offsets plus retained records | A group's offset is a resume position, not a promise to retain records until it catches up. Expiry or compaction can remove them first. |
+| `AUTO_ACKNOWLEDGE` | Periodic auto-commit | Both can leave a loss window if progress is recorded before work finishes, but timing differs. With Kafka, auto-commit safety depends on processing the polled batch before subsequent polls or closure; asynchronous workers need special care. |
+| `CLIENT_ACKNOWLEDGE` | Manual offset commit | Both let the application control progress, but JMS acknowledgment covers consumed messages in a session; Kafka commits the **next** offset per partition, covering earlier offsets too. |
+| Transacted JMS session / JTA | Kafka transactions | Kafka can atomically commit produced Kafka records and consumed offsets when configured for consume-transform-produce; `read_committed` hides aborted transactional records. This does not automatically include an external database or payment API. JTA/XA has different resource boundaries. |
+| MDB rollback and redelivery | Offset recovery plus application/framework error handling | Not committing a failed record does **not** make the next `poll()` automatically replay it in the same running consumer: its in-memory position already advanced. Seek/retry, framework error handling or restart/rebalance can re-read; don't commit past unfinished work accidentally. |
+| JMS selector | Application filtering or separate topics | Kafka consumers normally read records and filter in the application. A key chooses a partition; it is not a broker-side selector or subscription filter. |
+| Request–reply using `JMSReplyTo` | Reply topic and correlation | Possible, but adds correlation, timeouts and operational complexity; choose messaging or HTTP/gRPC based on actual requirements rather than assuming either is always right. |
+| JMS priority | No general per-message broker priority | Separate topics and consumer capacity can provide isolation; separate partitions alone do not automatically prioritize consumption. |
+
+**Failure walkthrough:** a Kafka consumer polls offsets 10–12 and fails at 11. Its in-memory position may already be 13. Merely withholding a commit doesn't rewind it: configure a seek/retry or stop and resume from a safe committed offset, and don't commit 13 while 11 is unresolved. A retry or DLQ topic is one option, but deciding when to advance the source offset requires a reliable publish/error-handling strategy. Framework defaults differ.
+
+**Exactly-once boundary:** Kafka's transactional consume-transform-produce pattern requires coordinating the input offsets with output writes in the Kafka transaction, and downstream consumers using `read_committed`. If input itself is transactional, consume it with `read_committed` too to avoid processing aborted records. Idempotent producer settings or `read_committed` alone do not give an external database or payment API exactly-once side effects. Design those separately with idempotency, transactional state or another suitable pattern. [Kafka consumer API](https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html) · [Kafka transactions](https://developer.confluent.io/learn/kafka-transactions-and-guarantees/).
 
 ## 4. Closing the gap — a concrete plan
 
@@ -72,43 +120,59 @@ The practical difference: virtual topics scale with consumers joining/leaving at
 2. **Lock in the vocabulary you don't have yet:** broker, partition, offset, consumer group, replication factor, ISR (in-sync replicas), leader/follower, producer `acks` levels (`0`/`1`/`all`), idempotent producer, transactions, Kafka Streams/Connect (awareness-level), Schema Registry + Avro (backward/forward compatibility) if your target role does event-driven integration.
 3. **Rehearse the handful of questions that actually get asked:**
    - *"Why does partition key design matter?"* — ordering is guaranteed only within a partition; a bad key choice creates a hot partition and starves parallelism.
-   - *"How do you handle a poison message?"* — in MDB it rolled back to the queue automatically; in Kafka you detect the failure, skip or route to a DLQ topic, and advance the offset yourself — otherwise you've created an infinite redelivery loop that blocks the partition.
-   - *"How do you get exactly-once in Kafka vs. a transacted JMS session?"* — idempotent producer + `transactional.id` + `read_committed` consumers, versus a single JTA-managed session; same goal, structurally different mechanism.
-   - *"When would you still pick JMS/MQ over Kafka?"* — strict ordering with request-reply semantics, lower-throughput enterprise integration, mainframe/EJB-era system boundaries. This is the one question where your 20+ years gives you a *better* answer than a Kafka-only candidate.
+   - *"How do you handle a poison message?"* — check the MDB transaction and broker redelivery/DLQ policy; in Kafka configure seek/retry or error-handler behavior, and only advance a safe offset when the failure is resolved or reliably handled.
+   - *"How do you get exactly-once in Kafka vs. a transacted JMS session?"* — first define the boundary: Kafka output and consumed offsets can be atomic in a Kafka transaction; JMS plus a database requires correctly enlisted JTA/XA resources. External effects need their own design.
+   - *"When would you still pick JMS/MQ over Kafka?"* — consider existing mainframe/EJB integration, queue-oriented work distribution, request–reply needs and operational fit; compare ordering and throughput requirements for the actual workload.
 4. **Interview framing — the honest version, not the padded one:** lead with the depth you actually have (three MQ vendors, MDB transaction internals, redelivery/ack semantics most candidates have never touched), state Kafka exposure as recent, deliberate, hands-on upskilling with a concrete thing you built, and answer every "have you used X" by mapping it to what you've run in production and naming the real difference. That's a credible senior narrative; claiming fabricated Kafka production history is not, and collapses under one follow-up question.
 
 ## 5. Kafka vs. RabbitMQ: the queue-vs-log mental model
 
 Most "Kafka vs. RabbitMQ" debates are really "log vs. queue" debates — once that distinction is clear, the rest of the comparison falls out of it.
 
-**The foundational reframe:** RabbitMQ is a smart broker with dumb consumers — it tracks per-message state (who got it, was it acked, should it be redelivered, which queue does it route to). Kafka is a dumb broker with smart consumers — it just appends to a file and tells each consumer "you're at byte offset N"; consumers own their own position.
+**The foundational reframe:** a conventional RabbitMQ queue tracks deliveries and acknowledgments per message; Kafka consumers read an ordered partition log and track positions. Kafka brokers also store committed group offsets and manage retention, replication and group coordination—neither broker is simply “dumb.”
 
-**The physical analogy:** a **queue** (RabbitMQ/SQS) is a **to-do list** — take an item, do it, cross it off, it's gone; consumption *destroys* the work. A **log** (Kafka) is a **newspaper archive** or ledger — everyone reads the same pages, your bookmark is yours alone, reading changes nothing; consumption *observes* the work without consuming it. That single difference generates every other difference below.
+**The analogy:** a queue is a **to-do list**: after successful acknowledgment, the broker can remove that queue's copy. A Kafka log is a **shared journal**: reading or committing an offset does not remove a record; it remains available subject to retention and compaction.
 
-| | Queue (RabbitMQ) | Log (Kafka) |
+| | Conventional RabbitMQ queue | Kafka topic |
 |---|---|---|
-| Message after read | Deleted | Retained |
-| Consumer position | Broker-tracked | Consumer-tracked (offset) |
-| Replay | Not supported | Core feature — reset offset, reprocess from any point |
-| Multiple independent consumers | Fan-out via exchanges; broker tracks state per queue | Native — each consumer group reads independently, no coordination |
-| Ordering | Per-queue, lost once you parallelize consumers | Guaranteed per partition only |
-| Parallelism unit | Consumers (add freely) | Partitions (fixed at topic creation — must be planned ahead) |
-| Routing | Rich (topic, header, direct, fanout exchanges) | Just topic + partition key |
-| Per-message ack/retry | Precise, selective | Offset-based; one poison message blocks the rest of its partition |
-| Delayed/priority messages | Supported (plugin / native) | Not supported — route priority traffic to a separate topic instead |
-| Throughput | High (tens of thousands/sec) | Extreme (millions/sec) |
-| Operational weight | Moderate | Heavier (though KRaft removed the ZooKeeper dependency) |
+| After successful consumption | Acknowledged message is removed from that queue | Record remains until retention/compaction removes it |
+| Consumer progress | Broker tracks deliveries and acknowledgments | Consumer position advances locally; committed group offsets are stored by Kafka |
+| Replay | An acknowledged queue message is not normally replayable from that queue; archive or republish separately | Reset offsets while the relevant records remain available |
+| Independent consumers | Exchange routes copies to separate queues | Consumer groups read the same retained records independently |
+| Ordering | Queue delivery order can be affected by competing consumers, redelivery and priorities; processing order needs design | Ordered within a partition, not across partitions; processing concurrency still matters |
+| Scaling | Competing consumers share a queue, subject to workload and broker limits | At most one active group member owns a partition at a time; more members than partitions leave some idle |
+| Recovery | Acknowledge, reject/requeue and DLQ policies are per message/delivery | Offset-based; retry/seek, pause or DLQ handling determines whether a bad record blocks later work |
+| Latency / throughput | Depends on queue type, persistence, size and workload | Depends on partitions, replication, batching and workload; benchmark rather than assume fixed rates |
 
-**Verb test — the single heuristic that resolves most real decisions:** *"Do this task"* is a command → queue (one owner, success means it's done and gone — send an email, resize an image, charge a card). *"This happened"* is a fact → log (many interested parties, now and in the future — `OrderPlaced`, `PriceChanged`; the producer doesn't know or care who's listening). **Commands → queue. Events → log.**
+These are conventional **queues** versus Kafka logs; RabbitMQ also offers **streams**, which have log-like retention and replay semantics. Kafka partition counts can be increased, but doing so can change key-to-partition mapping and affect ordering assumptions.
 
-**The temporal reframe:** a queue couples producer and consumer in time — a message must be consumed to have value. A log decouples them in time — a consumer that doesn't exist yet can still receive everything a producer emitted years earlier. Kafka is time-travel for data; a queue is a conveyor belt.
+**Decision heuristic, not a rule:** a task requiring one worker often fits a queue; an event many consumers may independently replay often fits a retained log. Either technology can carry commands or events. A durable queue also decouples producer and consumer in time; Kafka replay is limited to records still retained, not an indefinite historical archive.
 
-**For CDC/index-sync specifically**, Kafka wins over a plain queue on four concrete properties: ordering per key (partitioning by entity ID keeps every update to the same row in order — RabbitMQ with multiple competing consumers gives no such guarantee), replay (rebuilding a search index or derived store is a routine operation; Kafka resets an offset, a queue needs a separate full-scan rebuild job), native multi-consumer fan-out without per-consumer broker config, and log compaction (a compacted, keyed topic is effectively a replayable snapshot of current state — the exact shape an index-sync feed needs). This is also why Kafka is the default, best-supported sink for **Debezium CDC**.
+**CDC / index-sync scenario:** if a search index must be rebuilt from change events, a retained Kafka topic can support replay by resetting offsets while the needed history remains available. A compacted topic retains the latest value per key eventually, but is not an immutable full history or a substitute for understanding tombstones, retention and a consistent rebuild. Ordering per entity also depends on stable key-to-partition mapping and processing. Compare these guarantees against a queue plus an external archive or database snapshot.
 
-**Where the models break down — know the failure modes:**
-- Kafka's partition count is a hard ceiling on consumer parallelism; repartitioning later is painful.
-- Kafka head-of-line blocking — one bad message in a partition stalls everything behind it; needs an explicit DLQ, unlike RabbitMQ's per-message `nack`.
-- Kafka is not a task queue — forcing "run 10k jobs" workloads onto it fights the model constantly.
-- RabbitMQ queues should stay shallow; it's designed for messages in flight, not for storage.
+**Poison message trade-off:** blocking a Kafka partition while retrying preserves its order but delays later records. Sending a failed record to a retry/DLQ topic can keep the partition moving, but may change processing order and requires reliable handling of both the failure and the source offset. RabbitMQ's per-delivery `nack` offers another control point, but retry limits and DLQ behavior still need configuration.
 
-**Final compression:** a queue distributes work; a log distributes truth. Ask which one you're actually moving.
+## 6. RabbitMQ vs. ActiveMQ vs. IBM MQ — choosing and operating a broker
+
+**Interview scenario:** "Our online banking app sends work to back-end systems. Some consumers are existing EJB applications; another is a new Spring Boot service. How would you choose between IBM MQ, ActiveMQ and RabbitMQ?" Start with the existing integration contracts and team's operational experience, then discuss routing, transactions, failure recovery and availability. All three support asynchronous messaging; none is automatically reliable simply because of its name.
+
+| Dimension | RabbitMQ | ActiveMQ | IBM MQ |
+|---|---|---|---|
+| Common fit | Polyglot services and flexible message routing | Java/JMS-oriented systems | Enterprise integration, including IBM mainframe estates |
+| Application interface | Commonly AMQP clients / Spring AMQP; a JMS client is also available | JMS is a prominent interface; other protocols are available | JMS and IBM MQ-native APIs, among other interfaces |
+| Routing model | Exchanges route to queues via bindings | Queues and topics; Classic also offers virtual topics | Queue managers own destinations; channels connect queue managers |
+| Deployment and support | Open source; commercial support is also available | Open source; **Classic and Artemis are different brokers** | Commercial IBM product with distributed and z/OS offerings |
+
+These are tendencies, not exclusive capabilities: IBM MQ and ActiveMQ can serve non-Java clients, and RabbitMQ can be used from JMS. Exact features and guarantees depend on the broker, version, client and configuration.
+
+**Follow-up: "We already use MDBs and IBM MQ. Would RabbitMQ be a drop-in replacement?"** Not necessarily. A JMS client for RabbitMQ can expose a familiar API, but check whether the existing transaction manager, selectors, message groups, durable subscriptions, retry/DLQ behavior and provider-specific configuration work as required. With native Spring AMQP, the application and operational model explicitly change to exchanges, bindings and queues. Even ActiveMQ Classic → Artemis is a broker migration with different configuration and operations, not just a version upgrade.
+
+**Follow-up: "How do you know an order event was delivered?"** Separate three milestones: (1) the producer's send or publish result, (2) broker acceptance and routing/storage under the configured durability policy, and (3) the consumer's completed business work and acknowledgment. In RabbitMQ a **publisher confirm** reports broker handling, not that a consumer processed the event; an unroutable publish can still be confirmed, so handle unroutable messages separately (for example with mandatory returns). A consumer can update the database and crash before acknowledging, causing a duplicate delivery. Use an idempotency key or processed-message record; don't equate broker acceptance with end-to-end business success.
+
+**Follow-up: "What happens if processing updates a database and the consumer crashes?"** With an MDB and a properly configured JTA/XA transaction, message consumption and an enlisted database update can commit or roll back together. That requires an XA-capable broker/client, database and transaction manager; a local JMS transaction alone doesn't include an independent database transaction. If distributed transactions aren't appropriate, use a deliberate alternative such as idempotent processing and, for reliably publishing events after a database change, a transactional outbox. Check the actual delivery and failure guarantees rather than assuming any broker makes external side effects exactly once.
+
+**Follow-up: "Our consumer stops, or a broker node fails. Are messages safe?"** These are different failures. For consumer downtime, check destination/subscription existence, message persistence, expiry, retention and acknowledgment behavior. For node failure, also check the actual HA configuration: RabbitMQ quorum queues replicate queue data; ActiveMQ Classic and Artemis have distinct HA options; IBM MQ has platform-specific queue-manager HA, including z/OS queue-sharing groups. A clustered broker alone doesn't prove that a particular destination and message survive a failure. For poison messages, agree on retry limits, dead-letter handling and how operators inspect and replay or resolve them.
+
+**Decision for the banking example:** if the mainframe and established queue-manager/channel infrastructure already use IBM MQ, integration and operational continuity are strong reasons to keep it. A JMS-centric Java estate may favor ActiveMQ; a polyglot estate needing flexible exchange-based routing may favor RabbitMQ. Validate the choice against existing contracts, failure guarantees, team skills and support requirements rather than assuming a universal winner.
+
+References: [RabbitMQ publisher confirms and consumer acknowledgments](https://www.rabbitmq.com/docs/confirms), [ActiveMQ Classic virtual destinations](https://activemq.apache.org/components/classic/documentation/virtual-destinations), [IBM MQ for z/OS concepts](https://www.ibm.com/docs/en/ibm-mq/9.4.x?topic=overview-mq-zos-concepts).

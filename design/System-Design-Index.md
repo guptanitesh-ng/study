@@ -22,10 +22,10 @@ graph TD
 
 | If the interviewer asks about... | Go to | Section |
 |---|---|---|
-| SOLID principles, a specific GoF pattern | Design-Patterns-Principles | § 1-2 |
-| Inheritance vs. composition, why a design broke LSP | Design-Patterns-Principles | § 3 |
-| CQRS, Event Sourcing | Design-Patterns-Principles | § CQRS / Event Sourcing |
-| Idempotency, at-least-once delivery, event ordering | Design-Patterns-Principles | § 9 |
+| SOLID principles, a specific GoF pattern | Design-Patterns-Principles | §§ 1, 4–6 |
+| Inheritance vs. composition, why a design broke LSP | Design-Patterns-Principles | §§ 1, 7 |
+| CQRS, Event Sourcing | Design-Patterns-Principles | §§ 8–9 |
+| Idempotency, at-least-once delivery, event ordering | Design-Patterns-Principles | § 10 |
 | CAP theorem, PACELC, consistency vs. availability trade-off | Architecture | § CAP/PACELC |
 | Which architecture style fits this system (layered/modular monolith/microservices/event-driven) | Architecture | § 1 |
 | Modular monolith internals, "don't share tables" | Architecture | § 4 |

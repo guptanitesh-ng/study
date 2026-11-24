@@ -53,7 +53,11 @@ The throughline across all four: ES moved from a protocol that required the clie
 | `enabled` (false) | ES stores the field but doesn't parse/index it at all — it's a dead blob except for `_source` retrieval | Useful for opaque JSON blobs you need to retrieve but never query |
 | `store` (true/false) | Whether the field value is stored independently of `_source` for cheaper standalone retrieval | Rarely needed — `_source` already holds the raw document; `store` is a narrow optimization, not a default |
 
-**Reindexing is the recurring "gotcha" theme:** because a field's type can't be changed in place, any mapping correction (wrong analyzer, `text` vs `keyword` mistake, newly needed `nested` structure) requires creating a new index with the corrected mapping and reindexing all documents into it (the `_reindex` API), then swapping an alias to point at the new index. This alias-swap pattern — write/read through an alias, never a raw index name — is the practical answer to *"how do you change a mapping without downtime?"*
+**Reindexing:** changing an existing field's type or index-time analyzer generally requires a new index with corrected mappings, backfilling with `_reindex`, and switching an alias.
+
+`_reindex` does not copy destination mappings or settings; create and configure the destination first. The alias switch itself does not copy updates arriving during the backfill. Plan a write pause, dual-write/CDC catch-up or equivalent reconciliation, verify counts and representative queries, then switch and monitor. An alias swap alone does not guarantee zero data loss.
+
+**Read-after-write:** `refresh=wait_for` normally waits for a refresh to make the write searchable; `refresh=true` forces a refresh and frequent use can create inefficient small segments. With automatic refresh disabled, `wait_for` can wait indefinitely until a refresh occurs; listener saturation can itself force a refresh. Both options trade throughput/latency for visibility; direct document retrieval has different semantics from search. For faceted search, `post_filter` filters hits after aggregations so facets can describe the broader query result; put a filter in the query when aggregations should also be restricted.
 
 ### 3a. Analyzer, deep dive — the pipeline, not just the word
 
@@ -61,19 +65,16 @@ An analyzer is a **3-stage pipeline** that only runs on `text` fields. The easy 
 
 ```
                 char_filter(s)          tokenizer            token filter(s)
-"The Quick-Foxes!"  ──────────────►  "The Quick-Foxes!"  ──────────►  ["The","Quick","Foxes!"]  ──────────►  ["quick","fox"]
-                 (strip/replace           (split into                  (lowercase, stem,
-                  raw chars, e.g.          words/tokens —               remove stopwords,
-                  strip HTML)              this is the ONLY             synonym expand...)
-                                           stage that changes
-                                           the number of tokens)
+"The Quick-Foxes!"  ──────────────►  "The Quick-Foxes!"  ──────────►  ["The","Quick","Foxes"]  ──────────►  ["the","quick","foxes"]
+                 (strip/replace           (split into                  (lowercase)
+                  raw characters)          words/tokens)
 ```
 
 1. **`char_filter`** — operates on the raw string *before* tokenization (e.g. `html_strip` to remove `<b>` tags, or a `mapping` char filter to turn `:)` into `happy`).
-2. **`tokenizer`** — exactly one per analyzer, splits the string into tokens (the `standard` tokenizer splits on whitespace/punctuation; this is the stage that decides "how many tokens do I get").
+2. **`tokenizer`** — exactly one per analyzer, splits the string into initial tokens (the `standard` tokenizer uses Unicode text-segmentation rules); subsequent token filters may change their count.
 3. **`token filter(s)`** — operate on the token *stream* (lowercase, `stop` to drop "the"/"a", `stemmer` to reduce "running"→"run", `synonym` to expand "car"→"car, automobile").
 
-This is why the `standard` analyzer run on `"The Quick-Foxes!"` indexes the tokens `["quick", "fox"]` — tokenizer splits on the hyphen and punctuation, lowercase filter runs, stemmer reduces "foxes"→"fox", and `the` is dropped as a stopword. **The same analyzer must run at query time** (or the index-time analyzer is reused by default) so the search term goes through the identical transform — this is the whole reason `match` finds `"quick fox"` even though nothing in the source matches that literal substring.
+The default `standard` analyzer produces `["the", "quick", "foxes"]`: it lowercases but does **not** stem, and its stopword filter is disabled by default. A `match` query for `quick` can find the indexed token; don't assume `fox` matches `foxes` without an appropriate stemming configuration. Search analysis defaults to the field's analyzer, but can deliberately differ via `search_analyzer`; test both sides with `_analyze`.
 
 Custom analyzer example, annotated stage-by-stage:
 
@@ -104,7 +105,7 @@ PUT /products
 }
 ```
 
-**Recall trick:** char_filter = *"fix the raw text"*, tokenizer = *"cut it into pieces"*, token filter = *"fix each piece"*. Only the tokenizer can change the piece *count*; char_filter and token filter can only transform what's already there (or drop/expand existing tokens, in the case of `stop`/`synonym`/`edge_ngram`).
+**Recall trick:** char filter = *"fix the raw text"*, tokenizer = *"cut it into pieces"*, token filter = *"process the tokens"*. Token filters can also change the count: stop filters remove tokens and synonym or n-gram filters can add them.
 
 **`analyzer` vs `search_analyzer` — a common trip-up with n-gram analyzers like the one above.** By default the same analyzer runs at index time and query time, but a mapping can override the query-time one with `search_analyzer`. For an edge-n-gram autocomplete field, you *want* this override: index time still expands `"quick"` into grams (`q`, `qu`, `qui`, ...) so partial prefixes match, but query time should use a plain `standard` analyzer so the typed search term is tokenized normally, not re-expanded into grams — using the n-gram analyzer on both sides would make a search for `"quick"` also match on unrelated short fragments it shouldn't.
 

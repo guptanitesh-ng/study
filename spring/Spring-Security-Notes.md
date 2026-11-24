@@ -48,6 +48,8 @@ This is a form-login shape, not a JSON login endpoint. Supply real identity prov
 
 Loading a user is not authenticating a password. Prefer supported providers over custom credential checks. A provider may return `null` to defer to another provider; the manager's contract is authenticated success or failure.
 
+**External credential service:** `UserDetailsService` loads user details; it is not itself a general remote credential verifier. When credentials must be checked by an external service, use an appropriate supported authentication mechanism or an `AuthenticationProvider` that delegates verification and returns authenticated identity/authorities only after success. Handle remote timeouts and failures explicitly; don't log or retain passwords.
+
 ## 4. SecurityContext and sessions
 
 `SecurityContext` holds the current `Authentication`; Servlet code commonly accesses it through `SecurityContextHolder`. The configured `SecurityContextRepository` handles persistence/restoration where required.
@@ -55,6 +57,8 @@ Loading a user is not authenticating a password. Prefer supported providers over
 Setting a thread's context is not a complete persistent login. Custom login must also apply the configured session-authentication protections and context-save mechanism. Prefer the standard flow.
 
 `SessionCreationPolicy.STATELESS` tells Spring Security not to use an HTTP session for the security context. It does **not** prevent every component from creating a session/cookie, eliminate CSRF automatically or remove business/authorization state.
+
+**Session-policy follow-up:** `IF_REQUIRED` allows Spring Security to create a session when needed; `NEVER` does not create one itself but can use an existing session; `STATELESS` neither creates nor uses a session to obtain the security context. Other application components may still create a session. Defaults and context-saving behavior depend on the Spring Security version and configuration, so verify the actual filter chain.
 
 Do not assume arbitrary async threads inherit identity. Propagate context deliberately and clean it up; do not preserve stale authorization indefinitely.
 

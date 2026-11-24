@@ -38,6 +38,8 @@ Collections come in four basic flavors:
 
 `Map` is deliberately not part of this `Collection` hierarchy — see section 10 for why.
 
+**Iteration choice:** enhanced `for` works with arrays and `Iterable` values and is convenient when visiting each element. A traditional indexed `for` is useful when the index, traversal direction or multiple positions matter. Enhanced `for` over a collection uses an iterator; use that iterator's `remove()` when its contract permits removal during traversal, rather than modifying the collection behind it.
+
 ## 2. Choosing a collection by semantics
 
 The collections framework predates Java 5; Java 5 added generics, enhanced-for iteration and important concurrent utilities. Java 8 added stream integration and map convenience operations. Java 9 introduced `List.of`, `Set.of`, `Map.of`; Java 10 added `copyOf`; Java 21 added sequenced collection interfaces.
@@ -134,9 +136,9 @@ Ordinary fail-fast iterators may throw `ConcurrentModificationException` for uns
 | Interfaces implemented | `List` | Both `List` and `Deque` |
 | Backing structure | Resizable array; elements stored contiguously | Doubly linked list of nodes, each holding data plus next/previous references |
 | Element access | Direct index arithmetic (`get`/`set`) since it's backed by an array | Must walk the list from the nearer end |
-| Default capacity | 10, doubling as needed | 0 — starts as an empty list with no preallocated capacity |
+| Default capacity | Default constructor has initial capacity 10; growth policy is unspecified | Starts empty with no preallocated array |
 | Memory overhead | Low — just the element data in a contiguous block | Higher — each node also stores two neighbor references |
-| Best at | `get()`/search-heavy workloads | Insertion/deletion-heavy workloads |
+| Best at | Indexed access and compact traversal | Endpoint operations or insertion/deletion at a known iterator position |
 
 For `ArrayList`'s index access: elements laid out sequentially mean `get(20)` on an `int[]` starting at address 1000 just computes `1000 + 20 * 4 = 1080` — O(1), no traversal.
 
@@ -161,7 +163,7 @@ For `ArrayList`'s index access: elements laid out sequentially mean `get(20)` on
 | `Iterator.remove()` | O(n) |
 | `ListIterator.add(E element)` | O(n) |
 
-**Rule of thumb:** frequent insertions/removals favor `LinkedList`'s O(1) at known positions; frequent `get()`/search favors `ArrayList`'s O(1) random access. In practice, measure — cache locality often makes `ArrayList` win even for insert-heavy workloads unless insertions are genuinely at a known `ListIterator` position.
+**Rule of thumb:** frequent insertions/removals favor `LinkedList`'s O(1) at known iterator positions; indexed `get()` favors `ArrayList`'s O(1) random access. Searching for an arbitrary value is generally O(n) for both. In practice, measure — cache locality often makes `ArrayList` win even for insert-heavy workloads unless insertions are genuinely at a known `ListIterator` position.
 
 ## 5. Internal working of `HashMap`
 
@@ -228,15 +230,15 @@ All three implement `Set`, so they share the no-duplicates contract, but differ 
 
 **Red-black trees**, briefly: a self-balancing binary search tree where each node carries an extra "color" bit (red or black). Insertions/deletions rebalance and recolor the tree to keep the documented balance invariants, guaranteeing O(log n) search, insert, and delete even in the worst case — unlike a naive BST, which degrades to O(n) on sorted input.
 
-**Degenerate `HashMap`/`HashSet` buckets:** if many keys collide into the same hash bucket (adversarial or just unlucky input), a plain linked chain inside that bucket regresses toward O(n) lookups. Using a `TreeMap` sidesteps this by paying O(log n) unconditionally, ordering by hash code (and then by `compareTo`/`Comparable` if hash codes tie) rather than relying on bucket distribution. Modern JDK `HashMap` implementations also treeify an individual bucket into a mini red-black tree once its chain grows past an internal threshold, which caps the worst case without changing the public `HashMap` API.
+**Degenerate `HashMap`/`HashSet` buckets:** if many keys collide into the same hash bucket, a linked chain can regress toward O(n) lookup. A `TreeMap` instead orders keys by their natural ordering or a supplied `Comparator` and provides logarithmic core operations. Modern `HashMap` implementations may treeify crowded buckets, but their thresholds and behavior are implementation details, not a universal worst-case guarantee for arbitrary keys.
 
 ## 8. `ArrayDeque` internals: the circular array underneath
 
 Despite the name suggesting a linked structure, `ArrayDeque` is backed by a **resizable circular (ring) array** — a plain `Object[]`, not a doubly linked list.
 
-- **Layout:** `head` and `tail` index variables track the ends of the live data within the array. Elements don't shift when added/removed from either end; the indices just move, wrapping around the array's bounds via `(index + 1) & (array.length - 1)` — a bitmask instead of a modulo operator, which is why the backing array is always kept at a **power-of-two** size.
-- **Growth:** when the array fills up (`head` would collide with `tail`), it **doubles** in size and the elements are copied into the new array in logical order, re-establishing the circular layout. Like `ArrayList`, it only grows — there's no automatic shrink-to-fit.
-- **Complexity:** `addFirst`/`addLast`/`pollFirst`/`pollLast`/`peekFirst`/`peekLast` are all **O(1) amortized** — pure index arithmetic, no traversal and no per-element shifting, unlike `ArrayList.add(0, e)`. A resize is O(n) but amortizes to O(1) per operation, same reasoning as `ArrayList`'s doubling.
+- **Layout:** head and tail indices track the ends of the live data, wrapping around the array; ordinary end operations do not shift all elements. Exact wraparound and capacity rules are implementation-specific.
+- **Growth:** when capacity is exhausted, a larger array is allocated and elements are rearranged. Do not assume a particular growth factor or power-of-two capacity across JDK versions.
+- **Complexity:** end operations are **O(1) amortized**: an occasional O(n) resize is spread over many operations, unlike shifting elements on every `ArrayList.add(0, e)`.
 - **No nulls:** `ArrayDeque` rejects null elements, because `null` is used internally as the sentinel marking an empty slot; `peekFirst()`/`peekLast()` on an empty deque rely on this to safely return `null` rather than ambiguous data.
 - **Why prefer it over the alternatives:** it's generally faster than `LinkedList` for stack/queue/deque use because there's no per-node allocation or pointer-chasing — better cache locality, same reason `ArrayList` tends to beat `LinkedList` in practice (section 4). It's also preferred over the legacy `Stack` class, which extends `Vector` and pays for synchronization on every operation even in single-threaded use.
 
@@ -255,11 +257,11 @@ This is also why keys in a map (or elements in a set) should be **immutable**: m
 
 **Fail-fast** iterators detect, on a best-effort basis, that the collection's structure changed since iteration began (any thread adding/removing/updating an element while another thread — or even the same thread via the wrong API — is iterating) and throw `ConcurrentModificationException`. This is implemented via a modification counter checked during iteration; because the check itself isn't synchronized, a concurrent thread's change can occasionally go undetected. The Javadoc explicitly says this is not a guarantee applications may rely on. Iterators from `Vector`, `ArrayList`, `HashSet`, and most pre-concurrent-collections classes are fail-fast.
 
-**Fail-safe** iterators never throw `ConcurrentModificationException` because they operate over a snapshot/clone rather than the live structure. `CopyOnWriteArrayList`'s iterator and `ConcurrentHashMap`'s `keySet()` iterator are fail-safe examples.
+**Concurrent iteration has different semantics.** `CopyOnWriteArrayList` iterators traverse a snapshot. `ConcurrentHashMap` iterators are **weakly consistent**: they can reflect some updates since creation, are not snapshots, and do not throw `ConcurrentModificationException`. “Fail-safe” is informal terminology and does not imply a snapshot.
 
 ### Removing during iteration
 
-`Collection.remove(Object)` and `List.remove(int index)` work fine when you're not iterating. While iterating, using either of those (instead of the iterator's own removal) throws `ConcurrentModificationException`. Use `Iterator.remove()` to remove the current element from the iterator's perspective during a traversal; it's the method actually designed for this.
+For a fail-fast collection, structural modification through the collection while iterating may trigger `ConcurrentModificationException` on a best-effort basis. Use `Iterator.remove()` when that iterator supports removal; concurrent and snapshot iterators have their own contracts.
 
 ### `Iterator` vs `ListIterator`
 
@@ -342,7 +344,9 @@ This connects back to the immutable-key point in section 9: an immutable key gua
 
 **`IdentityHashMap`** — implements `Map` using **reference equality** (`k1 == k2`) instead of `equals()`/`hashCode()` to compare keys (and values). Typical uses: topology-preserving object-graph transformations such as serialization or deep-copying, where a "node table" must track which object references have already been processed without accidentally merging distinct-but-`equals()` objects; also maintaining per-object proxies, e.g. in a debugging facility.
 
-**`WeakHashMap`** — an entry is automatically removed once its key is no longer in ordinary use elsewhere; more precisely, holding a mapping for a key does not prevent that key from being garbage-collected. This makes it a reasonable building block for a memory-constrained cache, since the map itself cleans up unused entries rather than requiring explicit eviction logic.
+**`WeakHashMap`** — its weak key references do not themselves keep keys alive. An entry can disappear after its key becomes weakly reachable and is collected; neither collection nor removal happens at a predictable time. Values are strongly referenced, so a value that refers back to its key, directly or indirectly, can prevent reclamation.
+
+**Cache follow-up:** it can associate metadata with externally owned objects without keeping those owners alive, but it does not provide predictable maximum size, TTL, refresh or hit rate. If a service needs a bounded product cache with a five-minute freshness policy, use a cache with explicit size/expiry controls rather than letting GC decide when entries disappear. `WeakHashMap` is not thread-safe without appropriate coordination.
 
 ## 15. Unmodifiable collections and the `Collections` utility class
 

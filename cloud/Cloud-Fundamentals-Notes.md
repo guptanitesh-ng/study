@@ -15,6 +15,8 @@ Related: [Spring Boot](../spring/Spring-Boot-Notes.md#7-boot-vs-cloud) (Spring B
 
 A **VM** virtualizes hardware: each VM has its own full OS kernel, so isolation is strong but every VM pays the cost of booting and running a complete OS (minutes to start, GBs of disk/RAM overhead). Good for: running different OS kernels side by side, strong workload isolation, legacy apps that assume a dedicated machine.
 
+**Why keep a VM when containers exist?** A legacy application may require a particular OS, native library or proprietary application server; a VM gives control over that environment. A test VM can be restored to a known snapshot after a destructive experiment. Snapshots are useful for rollback, but are not a substitute for independent backups or a tested recovery plan.
+
 **Multi-cloud vs. hybrid cloud** — a distinction interviewers like to probe because people conflate them:
 - **Hybrid cloud** — one workload spans on-prem + cloud (or two clouds) as *one coordinated system*, usually for data residency, latency, or gradual migration (e.g., keep the DB on-prem, burst compute to Azure).
 - **Multi-cloud** — using more than one cloud provider for *different, independent* workloads or for redundancy/negotiating leverage — not necessarily integrated.
@@ -135,6 +137,23 @@ A reasonable baseline to state in an interview: HPA for synchronous API pods, KE
 
 **AKS vs. Azure Spring Apps:** AKS is general-purpose container orchestration — you own the Dockerfile, Helm chart, and scaling config, for any workload. Azure Spring Apps is a narrower, opinionated PaaS specifically for Spring Boot/Spring Cloud apps — push the jar, the platform handles the container, service discovery, and config server wiring for you, at the cost of control (you can't arbitrarily run non-Spring workloads or hand-tune the underlying pod spec).
 
+**Platform decision in practice:** VMs offer OS-level control but leave patching, runtime and deployment more directly to the team. App Service manages a web-app hosting platform; Azure Container Apps manages container execution and event-driven scaling without requiring teams to operate Kubernetes directly; AKS provides Kubernetes controls with additional cluster, networking and operations ownership. Functions fits supported event-driven workloads with an execution model and hosting-plan constraints to examine. Choose based on runtime, networking, state, scaling and operational ownership—not a blanket “serverless is best.” Keep durable state outside replaceable instances.
+
+**Java workload selection — what would the team actually own?**
+
+| Workload / constraint | Candidate | What remains your responsibility |
+|---|---|---|
+| Spring Boot web API packaged as a JAR; team wants minimal platform administration | **App Service** using a supported managed Java runtime | Application, dependencies, configuration and secrets; check supported runtime/server versions, networking and patch policy. A custom container shifts image and JVM patching back to you. |
+| Existing Java monolith packaged as an image, or HTTP service plus event-driven workers | **Container Apps** | Build, scan and update the image and JVM; choose scaling rules, resource limits and state storage. The platform manages container hosting, not application correctness. |
+| Small event-triggered Java handler | **Functions** | Adapt to triggers, retries and the chosen hosting plan's execution limits; externalize durable state. Cold starts and instance-local caches/session state matter when instances scale or restart. |
+| Mixed services requiring Kubernetes APIs, custom scheduling or ecosystem tooling | **AKS** | Image/JVM updates, workloads, node pools, networking, upgrades and cluster policies under the applicable AKS responsibility model. Greater control has an operations cost. |
+| Proprietary application server, specific OS or native dependency unsupported by the managed options | **VM** | OS/JVM/server patching, security hardening, monitoring, capacity and recovery. First verify whether a supported managed runtime or container can meet the requirement; native code alone does not require a VM. |
+| Existing Spring Apps deployment | **Migration assessment** | Check dependencies on its managed Spring features and plan the migration before retirement; do not assume Container Apps or AKS is a drop-in replacement. |
+
+**Artifact follow-up:** source deployment builds on the platform; deploying a CI-built JAR/WAR or container image lets the team test and promote that exact artifact. EAR/WAR support depends on the selected runtime and server, not just the word “Java.” Managed runtimes can reduce OS/JVM maintenance, but the team still owns dependencies, secrets, access, data and application-level security; verify the service's actual shared-responsibility model.
+
+**Lifecycle caveat:** Azure Spring Apps Basic, Standard and Enterprise retire on **March 31, 2028**. For new designs and migration planning, assess Azure Container Apps or AKS against the workload instead of treating Spring Apps as a long-term default. [Microsoft retirement announcement](https://learn.microsoft.com/en-us/azure/spring-apps/basic-standard/retirement-announcement).
+
 **OpenShift vs. Cloud Foundry:** OpenShift is Kubernetes with Red Hat's opinionated layer on top (you still think in pods/deployments, just with more guardrails and built-in tooling). Cloud Foundry/PCF abstracts away Kubernetes concepts almost entirely — you `cf push` a buildpack-detected app and never write a Deployment/Service yourself. The trade-off is the same shape as PaaS-vs-IaaS generally: CF is faster to a working deployment for a supported app shape, OpenShift/K8s gives more control when the workload doesn't fit CF's opinions.
 
 ## 6. Observability: OpenTelemetry, Azure Monitor, Application Insights
@@ -148,6 +167,20 @@ A reasonable baseline to state in an interview: HPA for synchronous API pods, KE
 | **Metrics** | "Is it healthy right now, in aggregate?" — numeric, cheap to store/alert on | Request rate, error rate, p95/p99 latency, JVM heap/GC pause time |
 | **Logs** | "What exactly happened for this one event?" — unstructured or structured detail | Exception stack trace, a specific request's processing steps |
 | **Traces** | "Where did the time go, across services, for this one request?" — causal chain | A request spanning Gateway → Service A → Service B → DB, each hop as a span |
+
+**Spring Boot logs on AKS → Log Analytics:** a normal SLF4J/Logback application can write to the console without Azure-specific logging code. The usual collection path is `Spring Boot → stdout/stderr → container runtime log files on the node → Azure Monitor agent → Log Analytics workspace`, commonly into the `ContainerLogV2` table. The platform team must enable **Container Insights**, connect a workspace, and configure data collection to include the container logs; deploying to AKS alone doesn't enable this pipeline.
+
+On the application side, verify logs actually reach stdout/stderr: a Logback configuration that writes *only* to a file inside the container won't be collected by this standard console-log path. JSON formatting and trace IDs make investigation easier but are not required for basic collection; avoid logging secrets or sensitive data. Stack traces may need multiline collection configuration to appear as one entry.
+
+**Practical investigation:** if order-service logs are missing from Log Analytics, first check `kubectl logs` for the pod, then check Container Insights, workspace and collection filters. If using `ContainerLogV2`, search the workspace with the actual namespace and container name:
+
+```kusto
+ContainerLogV2
+| where TimeGenerated > ago(1h)
+| where PodNamespace == "banking" and ContainerName == "order-service"
+| project TimeGenerated, PodName, LogLevel, LogMessage
+| order by TimeGenerated desc
+```
 
 The trap in an interview is treating these as interchangeable: a metric tells you *that* p99 latency spiked at 14:32; it can't tell you *why* — that needs a trace (which service/span in the chain actually slowed down) and then a log (the specific error/condition inside that span).
 

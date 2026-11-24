@@ -32,6 +32,10 @@ If `controller -> service -> readFile` throws an IOException, Java looks for a m
 
 Each method through which a checked exception can escape must declare an appropriate checked type or catch it. A caller of a declaring method must satisfy the same rule even if that particular run happens not to fail. An overriding method may declare fewer or narrower checked exceptions, but cannot broaden the checked-exception contract of the method it overrides.
 
+**Why the restriction?** A caller compiled against the base method handles only its declared checked exceptions. If an override could introduce an unrelated checked exception, substituting the subtype would surprise that caller with a failure its contract did not require it to handle. Narrowing or omitting the declaration preserves the caller's obligation; unchecked exceptions remain possible.
+
+**Class loading failure follow-up:** `ClassNotFoundException` is a checked exception commonly reported by an explicit lookup such as `Class.forName` when a class cannot be found. `NoClassDefFoundError` is a linkage error that can arise when normal execution needs a definition that was available at compile time but is missing at runtime; it can also follow a previous failed class initialization. Check the first causal exception, runtime dependencies and classloader visibility rather than merely catching the later error.
+
 An ordinary try must have catch and/or finally. Catch clauses follow the try and an optional finally follows them. A catch for a superclass handles its subclasses, so `catch (Exception e)` before `catch (IOException e)` would make the latter unreachable. Java 7 multi-catch uses `catch (IOException | SQLException e)` for unrelated alternatives; a superclass and its subclass cannot appear together in that union.
 
 ### Java 7 builds automatic closing on that propagation model
@@ -701,6 +705,8 @@ The Core guide's initialization section introduces the heap, reachability and GC
 
 The collector asks whether an object can still be reached from a **GC root** by following references. Typical roots include references held by live threads, static fields, JNI handles and active synchronization structures. If an object is unreachable, it is eligible for reclamation; that does not mean collection happens immediately or at the instant its lexical scope ends.
 
+**Reference strengths in practice:** a strong reference keeps its referent strongly reachable. A `WeakReference` does not prevent reclamation when the object is only weakly reachable, useful for metadata that must not keep an owner alive; ensure the metadata value doesn't itself strongly reference the key. `SoftReference` is cleared at the collector's discretion in response to memory demand, so it is not a predictable cache policy; prefer explicit size/expiry limits. A `PhantomReference` cannot retrieve its referent and can be enqueued after phantom reachability for cleanup coordination; use explicit resource closing rather than relying on GC timing.
+
 ```text
 GC roots
    |
@@ -717,6 +723,10 @@ In the example, the request object can become unreachable after a call finishes,
 GC primarily reclaims heap objects. A JVM process also consumes memory outside the Java heap: thread stacks, Metaspace, JIT code cache, direct/native buffers, JNI libraries and other native allocations. Therefore a process can exceed a container limit or fail with a native-memory error while Java heap usage is below `-Xmx`. Class metadata can be unloaded when the relevant classes and class loaders become unreachable, but a class-loader reference leak can prevent that.
 
 GC is not deterministic cleanup for files, sockets or database connections. Use try-with-resources and explicit ownership; do not wait for an object to become unreachable to release external resources.
+
+**Historical follow-up: PermGen, strings and Metaspace.** In HotSpot, the interned-string pool moved from PermGen to the heap in Java 7; Java 8 removed PermGen in favor of native-memory Metaspace for class metadata, so old `PermSize`/`MaxPermSize` tuning is not a modern Metaspace setting. Heap strings can still be retained and class-loader leaks can still grow Metaspace. G1 string deduplication arrived in Java 8u20: it may share backing storage for equal strings, at a processing cost; it is not the same as `String.intern()` and does not eliminate the `String` objects. Java 9 Compact Strings use a compact representation where possible. Measure retained strings, CPU and GC behavior before enabling or tuning anything; supported collectors and flags depend on the JDK.
+
+**HotSpot versus GraalVM follow-up:** GraalVM can run Java on a JVM with a JIT compiler, or compile supported applications ahead of time to a **Native Image** executable; these are different execution modes. Native Image can improve startup and reduce runtime footprint, useful for short-lived or scale-to-zero services, but build time, reflection/dynamic-loading configuration, native-library compatibility, warm-up and steady-state throughput depend on the application. Test feature compatibility, startup, memory and sustained workload rather than claiming native code is universally faster. A JVM's JIT can optimize using runtime profiles; an AOT binary trades that runtime flexibility for different deployment characteristics.
 
 ### The algorithm building blocks
 
@@ -891,7 +901,7 @@ Wait for the 120-second recording to finish before copying the file. The PID `1`
 java -XX:StartFlightRecording=disk=true,dumponexit=true,dumponexitpath=/var/log/jfr/,maxsize=100m,maxage=1h -jar service.jar
 ```
 
-`disk=true` with a bounded `maxsize`/`maxage` keeps a rolling window of recent activity on local disk at roughly 1–2% CPU overhead; `dumponexit=true,dumponexitpath=...` means that if the pod crashes or is OOMKilled, the recording leading up to the crash is flushed to disk before exit—mountable as a volume or pulled from a sidecar—instead of being lost with the container. This converts "the incident already happened and I have no data" into "the evidence from right before the kill is already on disk." Tier 2 (an explicit, longer, higher-detail `jcmd JFR.start` or an async-profiler attach) is then reserved for confirming a specific hypothesis the Tier 1 baseline raised.
+`disk=true` with a bounded `maxsize`/`maxage` maintains a rolling recording; measure overhead under the actual workload. `dumponexit=true` can write a final recording on an orderly JVM shutdown, but a Kubernetes OOM kill normally uses `SIGKILL`: no JVM shutdown hook or final dump is guaranteed. JFR repository chunks may exist on disk, but recovery and persistence depend on the JVM and storage setup; test the actual failure path. For reliable evidence, periodically dump recordings to suitably protected persistent storage or use an approved external collection strategy, with bounded retention. Tier 2 is a targeted higher-detail recording or profiler attach once a hypothesis exists.
 
 Do not expose JMX or remote debugging ports publicly just to make diagnosis easier. Prefer approved, authenticated and network-restricted operational paths, and follow the cluster's least-privilege and incident-data handling policies.
 

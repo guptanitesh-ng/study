@@ -25,6 +25,7 @@ Companion guides: [Boot](Spring-Boot-Notes.md), [REST + MVC](Spring-REST-MVC-Not
 - **Dependency Injection (DI)** is one way to implement IoC: an object receives its collaborators rather than locating or constructing them. Constructor injection makes required dependencies explicit and supports immutable, fully initialized objects.
 - Prefer **constructor injection for required dependencies**. Use setter or method injection when a dependency is genuinely optional or must be reconfigured. A constructor with many unrelated dependencies can indicate that the class has too many responsibilities.
 - Common configuration styles are Java configuration (`@Configuration`, `@Bean`), component scanning (`@Component`, `@Service`, etc.), and XML. XML remains supported; it is simply not the default style in most modern applications.
+- **Legacy interview translation:** the old `@Required` setter marker depended on a bean post-processor and was deprecated; prefer a constructor for mandatory collaborators instead of assuming the annotation enforces a modern application's wiring. XML is still useful to recognize when maintaining an older system.
 - `@Configuration(proxyBeanMethods = false)` avoids CGLIB interception of calls between `@Bean` methods. In that mode, do not call one `@Bean` method from another expecting the container to return the managed singleton; express the dependency as a method parameter instead.
 
 ### Why constructor injection, and what if there are multiple constructors?
@@ -477,6 +478,8 @@ Spring AOP modularizes cross-cutting behavior such as transactions, caching, and
 - Proxies may be interface-based (JDK dynamic proxies) or subclass-based (CGLIB). Subclass proxies cannot override final methods and cannot subclass final classes. Exact proxy selection can depend on configuration and framework integration.
 - Private methods and self-invocations are not intercepted as ordinary proxy calls. Be prepared to explain why an annotation-driven behavior can appear to “not work.”
 - `@Aspect` uses AspectJ-style syntax, but Spring AOP is not the same as compile-time or load-time AspectJ weaving.
+
+**Advice choice in a request-timing example:** `@Before` runs before the method; `@AfterReturning` runs only on successful return and can inspect the result; `@AfterThrowing` observes failure; `@After` runs on either outcome like `finally`. `@Around` can time the call, invoke `proceed()`, or deliberately alter/skip it; forgetting `proceed()` prevents the target from running. Restrict the pointcut to the intended service boundary and test calls through the proxy, not self-invocation.
 
 ## 6. Corrections to specific claims in the PDF
 

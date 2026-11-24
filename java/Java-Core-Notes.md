@@ -894,6 +894,12 @@ For ordinary instance construction, after memory is allocated and fields have de
 
 **Static scope:** one static field is associated with a class as defined by its class loader, not necessarily one per JVM and certainly not one per application cluster. A `static Map` cache is neither automatically thread-safe nor shared between application replicas.
 
+### Class loaders: why the same class name can be incompatible
+
+In modern Java, the bootstrap loader loads core runtime classes; the **platform** loader replaced the Java 8 extension loader; the application loader typically loads application classes from the class path. Delegation commonly asks a parent first, but custom loaders and application servers may use different policies. Since Java 9, don't assume the application loader is a `URLClassLoader` or that the old extension-directory mechanism still applies.
+
+**Production symptom:** two plugins each load their own copy of an API class. A cast can fail with `ClassCastException` even though both types have the same fully qualified name: class identity includes the defining loader. Share the API through an agreed parent loader or a carefully designed module boundary, and inspect both class names *and loaders* when diagnosing. A redeploy whose old loader remains reachable can retain its classes and metadata; inspect GC roots and loader retention rather than blindly enlarging memory.
+
 ### The memory model versus implementation optimizations
 
 | Area | Useful mental model | Caveat |
@@ -1493,6 +1499,8 @@ Reflection can inspect fields/methods and invoke constructors/methods subject to
 ## 18. JDBC beneath modern data-access frameworks
 
 Most modern Java applications do not hand-manage `Connection`, `PreparedStatement` and `ResultSet` in every service. They use JPA/Hibernate, Spring Data, `JdbcTemplate`, jOOQ or another data-access layer. For relational databases, these abstractions commonly still use JDBC drivers underneath; the framework reduces repetitive plumbing, but it does not remove SQL, connection-pool limits, database transaction semantics or query costs.
+
+**Large result follow-up:** `Statement.setFetchSize(n)` is a driver hint about fetching rows in batches, not a limit on the total rows returned; whether it streams and what transaction settings it needs depend on the driver. `setMaxRows(n)` limits result rows, whereas a database-specific SQL limit can also influence the execution plan. Verify memory, round trips and driver behavior instead of assuming either guarantees streaming.
 
 ### The parts worth knowing at senior level
 

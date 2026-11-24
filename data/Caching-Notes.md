@@ -17,9 +17,13 @@ Related: [Spring Data](../spring/Spring-Data-Notes.md) (transactions, repositori
 | **Survives restart/redeploy** | No | Yes (if persistence enabled) |
 | **Failure mode** | Cache loss is local; other pods unaffected | A shared cache outage/latency spike affects every pod at once |
 
-**The interview trap:** "just add a cache" ignores this trade-off. A rolling deployment with an in-process cache gives every pod a different, eventually-stale view of the same key until each pod's TTL expires or it's evicted — that's fine for read-heavy reference data, not fine for anything requiring read-your-writes consistency across instances. Distributed caching fixes the consistency gap but adds a network dependency and a new failure mode: what does the app do when Redis itself is slow or down? (Fail open to DB, fail closed, or circuit-break — decide explicitly, don't let `RedisConnectionFailureException` propagate as a 500 for a GET that would've worked fine straight from the DB.)
+**The interview trap:** "just add a cache" ignores this trade-off. A rolling deployment with an in-process cache gives every pod a potentially different stale view until its TTL expires or it's evicted — unsuitable for cross-instance read-your-writes without more coordination. A shared cache reduces divergent copies but does not by itself make database writes and cache updates atomic. It also adds a network dependency: when Redis is slow or down, decide explicitly whether to fall back to the DB, fail closed or circuit-break, considering DB capacity and correctness.
 
 **Two-level caching** (L1 in-process + L2 distributed) is a legitimate real pattern — Caffeine as a short-TTL L1 in front of Redis as L2 — to shave the network hop for very hot keys, accepting a short window of cross-pod staleness on just those keys.
+
+**Write choices under load:** write-through updates the backing store as part of the write path, trading latency for a clearer persistence boundary. Write-behind acknowledges a cache update before an asynchronous persistence step: it can absorb bursts, but a crash, lost queue or reordered writes can lose or corrupt acknowledged updates unless durability, ordering, retries and reconciliation are designed explicitly. Write-around writes directly to the store and avoids polluting the cache with rarely reread data; invalidate/update any existing cached value or a later read can still be stale.
+
+**Freshness follow-up:** TTL is an expiry policy, not an absolute end-to-end staleness guarantee: stale source reads, update races or multiple cache layers can extend the observed window. An HTTP `ETag` with `If-None-Match` validates a representation and can yield `304`; it is not itself a cache invalidation event or a guarantee that every intermediary contacts the origin on each request.
 
 **Stacking two `@Cacheable` annotations for L1 + L2 (Ehcache + Redis) — yes, order matters, and there's a gap.** `@Cacheable` isn't `@Repeatable`, so two of them on one method need `@Caching`, each pointed at a different `cacheManager`:
 ```java
@@ -96,8 +100,8 @@ Without `@Caching`, the workaround is a separate helper method per cache operati
 
 - **Self-invocation bypasses the cache**, same root cause as `@Transactional` — these are proxy-based AOP. Calling `this.findById(id)` from another method in the same bean skips the proxy, so no cache check happens.
 - **Key design matters.** The default key generator combines all method args; an overload with the same effective lookup but different parameter order/count silently gets a different key. Use explicit `key = "#id"` (SpEL) for anything non-trivial.
-- **A `null` *key* is not the same question as a `null` *value* — and most providers don't tolerate it.** If `#id` evaluates to `null` (e.g., `@Cacheable(key = "#id")` called with `id == null`, or `SimpleKeyGenerator` with a single null arg), Spring doesn't special-case it — it passes `null` straight through to the backing `Cache.get(key)`/`put(key, value)`. `ConcurrentMapCache` and Caffeine are backed by a `ConcurrentHashMap`, which **throws `NullPointerException` on a null key** — it doesn't silently skip the cache or store it as a sentinel. `RedisCache` is just as bad in a different way: the key gets turned into `cacheName::` + the key's serialized form, and serializing/`toString()`-ing a `null` typically blows up before a request ever reaches Redis. Net effect: a null key is a hard failure, not a graceful cache-miss — guard it explicitly (`condition = "#id != null"` on the annotation, or validate before the call) rather than assuming the cache layer degrades gracefully.
-- **`@Cacheable` on a method that can legitimately return `null`** needs `unless = "#result == null"` or you'll permanently cache the miss (depending on provider null-handling) and never retry.
+- **A `null` *key* is not the same as a `null` *value*.** If an explicit expression such as `key = "#id"` evaluates to null, Spring's cache interceptor rejects the key rather than treating it as a miss. Validate the argument or use a condition such as `condition = "#id != null"`. By contrast, the default `SimpleKeyGenerator` wraps a single null argument in a non-null `SimpleKey`; it does not produce a null key. Null *results* are a separate provider/configuration decision.
+- **`@Cacheable` on a method that can return `null`:** if the provider and configuration allow caching nulls, a miss can remain cached until expiration or eviction. Use `unless = "#result == null"` when subsequent calls should retry instead; negative caching can be useful with an intentionally short lifetime.
 - **Exceptions are not cached** by default — a failed call doesn't populate the entry, so the next call retries the method. That's usually what you want, but it also means a failing downstream dependency gets hammered repeatedly if callers retry in a tight loop; pair with a circuit breaker if that's a risk.
 
 ## 4. Spring Cache abstraction vs. Spring Data Redis — use both, for different jobs
@@ -120,8 +124,8 @@ public RedisCacheConfiguration cacheConfiguration() {
 }
 ```
 - **No partial updates, no atomic ops.** Because the whole object is one serialized value, there's no way to bump a counter field or push onto a list inside it without read-serialize-deserialize-modify-write the entire blob yourself — the moment you need that, you're back to `RedisTemplate.opsForValue()/opsForHash()/opsForZSet()` directly, outside the annotation.
-- **TTL is per cache name, not per key**, configured via `RedisCacheConfiguration.entryTtl(...)` (or per-cache overrides in a `Map<String, RedisCacheConfiguration>` passed to the `RedisCacheManager` builder) — you can't give one specific key a different TTL than its siblings through the annotation alone.
-- **`@CacheEvict(allEntries = true)` works but isn't free** — since there's no native grouping, `RedisCacheManager.clear()` does a `SCAN` for the `cacheName::*` key pattern and deletes matches; fine at normal scale, but worth knowing it isn't an O(1) "drop collection" like a Mongo/SQL table truncate.
+- **TTL is configured on the cache**, not directly by the annotation. A fixed `entryTtl(Duration)` applies the same duration to its entries; Spring Data Redis 3.2+ also supports `entryTtl(TtlFunction)` to calculate a duration per entry from its key and/or value.
+- **`@CacheEvict(allEntries = true)` works but isn't free** — the default Redis cache writer uses `KEYS` and `DEL` for the cache prefix. For large keyspaces, configure a `SCAN` batch strategy where supported by your driver and deployment mode; neither approach is an O(1) table truncate.
 
 So yes — for plain request/response caching you genuinely never need to think about Redis data types. The moment the ask becomes "rank these", "atomically increment", "intersect these sets", or "give me field-level TTL", that's the signal to drop to `RedisTemplate` for that specific need rather than fighting the annotation.
 
@@ -140,7 +144,7 @@ So yes — for plain request/response caching you genuinely never need to think 
 
 Pick `volatile-*` policies when some keys must never be evicted (e.g., session data vs. disposable query-result cache sharing one Redis instance) — set a TTL only on the evictable ones.
 
-**Your understanding is correct — through `@Cacheable`, TTL is set per cache name, not per key.** As noted in §4, `entryTtl(...)` lives on a `RedisCacheConfiguration`, and one `RedisCacheConfiguration` backs one *cache name* — every key written under that cache name gets the same TTL (or no TTL, if you never call `.entryTtl(...)`). So to get the "session data has no TTL, query-result cache does" mix above while staying inside the abstraction, you don't set TTL per key — you register **two different cache names**, each with its own config, on the same `RedisCacheManager`:
+**Fixed TTL per cache is a simple choice.** To give session data no expiry and query results a five-minute expiry, register **two different cache names**, each with its own configuration, on the same `RedisCacheManager`:
 
 ```java
 @Bean
@@ -158,15 +162,15 @@ public RedisCacheManager cacheManager(RedisConnectionFactory cf) {
 }
 ```
 
-Both caches live in the same Redis instance; `sessions::*` keys have no TTL so `volatile-lru`/`volatile-ttl` skip them under memory pressure, while `searchResults::*` keys do have a TTL and are fair game. The one thing you genuinely **can't** do through the annotation is give two keys *within the same cache name* different TTLs — that requires dropping to `RedisTemplate.opsForValue().set(key, value, Duration.ofMinutes(n))` directly, bypassing `@Cacheable` for that specific write.
+Both caches live in the same Redis instance; `sessions::*` keys have no TTL so `volatile-lru`/`volatile-ttl` skip them under memory pressure, while `searchResults::*` keys do have a TTL and are fair game. For different lifetimes **within one cache**, configure a `RedisCacheWriter.TtlFunction` through `entryTtl(...)` in Spring Data Redis 3.2+; direct `RedisTemplate` writes are another option when the application needs explicit Redis operations.
 
 **Cache-aside (lazy loading)** — the dominant pattern with `@Cacheable`: app checks cache, falls back to DB on miss, writes result back. Simple, but the first request after an eviction always pays full DB latency ("cold cache" / thundering-herd risk if many requests miss simultaneously — mitigate with request coalescing or a short lock around the DB fill).
 
-**Write-through** — write goes to cache and DB together (or cache fronts the DB entirely); reads are always a cache hit after the first write. More consistency guarantee, more write-path complexity.
+**Write-through** — the cache write path also updates the backing store before reporting success. This adds write latency and failure-handling complexity; entries can still expire or be evicted, so later reads are not guaranteed hits. Define how partial failures and concurrent writes are handled.
 
-**Stale data and invalidation** are the two hard problems: TTL alone trades staleness for simplicity (accept data can be up to TTL seconds old); explicit `@CacheEvict` on writes gives freshness but requires every write path to remember to evict — miss one and you serve stale data indefinitely.
+**Stale data and invalidation** are the two hard problems: TTL limits an individual entry's lifetime but does not alone bound end-to-end staleness (§1). Explicit `@CacheEvict` requires every write path to evict at the correct time; missed evictions or races can leave stale values until another eviction or expiry, potentially indefinitely without either.
 
-## 6. Replication, persistence and cluster — awareness level
+## 6. Replication, persistence and cluster — operational reasoning
 
 Redis offers both durability options; which one matters depends on what's cached:
 
@@ -178,7 +182,13 @@ Redis offers both durability options; which one matters depends on what's cached
 **Replication/Sentinel/Cluster** — in practice you consume these as managed infrastructure (Azure Cache for Redis, AWS ElastiCache) configured declaratively, not hand-rolled:
 
 - **Replication** gives read replicas and failover; **Sentinel** adds automatic failover/monitoring for non-clustered deployments; **Cluster** adds horizontal sharding across hash slots for datasets/throughput too large for one node.
-- The one practical consequence worth knowing: replication is asynchronous by default, so a failover can lose the last few writes (and a client reading from a replica can see slightly stale data). If an interviewer pushes into hash-slot math or cluster bus ports, that's infra/ops depth beyond what most app-dev roles need — say so and pivot back to how the app handles a Redis connection failure, which is the part you actually own.
+- Replication is asynchronous by default, so a failover can lose recent acknowledged writes; replica reads can be stale. Sentinel monitors a primary and coordinates failover, but isn't a sharding mechanism or an absolute guarantee against acknowledged-write loss. Clients must discover the new primary, reconnect and handle ambiguous in-flight writes safely.
+
+**Cluster scenario:** one primary owns a subset of 16,384 hash slots. A primary failure affects keys in those slots until an eligible replica is promoted and clients refresh their routing; service behavior depends on cluster state and configuration. A hot key still lives on one shard, so adding shards alone won't split its traffic. A hash tag such as `{account:42}:balance` and `{account:42}:limits` deliberately places related keys in the same slot for supported multi-key operations, but overusing the same tag creates a hot slot. During resharding, cluster-aware clients must handle `MOVED`/`ASK` redirects.
+
+**When the interviewer asks how to reduce round trips:** pipelining sends multiple commands without waiting for each response; it does not make them atomic. `MULTI`/`EXEC` executes queued commands together, and `WATCH` can detect concurrent changes before `EXEC`; Redis transactions do not roll back successful commands after a runtime error. A Lua script can perform a bounded check-and-update atomically on the server, but long scripts block other work and writes made before a script error are not automatically rolled back. In Cluster, multi-key transactions/scripts must respect same-slot restrictions.
+
+**Pub/Sub versus Streams:** Pub/Sub is live, fire-and-forget delivery; a disconnected subscriber misses messages. Streams persist entries and support consumer groups, acknowledgments and replay while entries remain retained; consumers still need retry, idempotency and retention/lag monitoring. Neither should be assumed to provide exactly-once business effects.
 
 ## 7. Interview questions with answers and scenarios
 

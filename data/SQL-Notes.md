@@ -30,6 +30,16 @@ Companion guides: [JPA/ORM Core](JPA-ORM-Core-Notes.md), [Spring Data](../spring
 | `CROSS JOIN` | Cartesian product, every left row paired with every right row — usually a missing-join-condition bug unless it's intentional (e.g., generating a date-range × category grid) |
 | Self join | A table joined to itself via an alias, typically for hierarchical/parent-child data in the same table (`employees e JOIN employees m ON e.manager_id = m.id`) |
 
+**Interview scenario — customers disappear from a report:** a left join followed by `WHERE o.status = 'PAID'` excludes customers without an order: their null-extended status is not true under SQL's three-valued logic. Put the predicate in `ON` when the requirement is *all customers, with paid orders if any*:
+
+```sql
+SELECT c.id, o.id
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id AND o.status = 'PAID';
+```
+
+For customers with only unpaid orders, this also returns a null-extended order. The `WHERE` form is appropriate when you intentionally want only customers with matching paid orders. Multiple matching orders still produce multiple rows.
+
 **How the engine actually executes a join** (worth knowing even though you don't pick this — the optimizer does): **nested loop** (for each outer row, scan/seek the inner table — good when the outer side is small and the inner side has a usable index), **hash join** (build an in-memory hash table on the smaller input, probe it with the larger — good for large, unindexed equi-joins), **merge join** (both inputs already sorted on the join key, walk them in lockstep — good when both sides are already ordered, e.g. by an index). If a plan shows a nested loop over a large unindexed table, that's the tuning red flag, not the join type you wrote in SQL — you wrote a join; the engine chose *how*.
 
 ## 2. Keys: candidate, primary, unique, foreign
@@ -77,6 +87,16 @@ Oracle: `EXPLAIN PLAN FOR <query>` then query `PLAN_TABLE` (or just turn on `SET
 - **Full table scan vs index scan vs index seek**: a scan (table or full index) reads every row/every index entry; a seek seeks directly via the B+ tree to the matching range. A full table scan on a large table, where you expected an index to be used, is the single most common "why is this slow" finding.
 - **Estimated vs actual row counts** (only visible with `ANALYZE`/actual-plan modes, not plain `EXPLAIN`): a large gap between the optimizer's row-count *estimate* and the *actual* rows returned means statistics are stale or the predicate is one the optimizer can't estimate well (e.g. a correlated-column filter) — and a bad estimate is what causes the optimizer to pick the wrong join algorithm or join order in the first place, so this is often the *root cause* behind a scan-instead-of-seek finding, not just a secondary detail.
 - **Cost is relative, not absolute**: the "cost" number is the optimizer's own internal unit for comparing candidate plans against each other for *this* query — don't compare cost numbers across unrelated queries.
+
+**Worked diagnosis — illustrative plan, not an engine guarantee:** an order lookup filters `customer_id` and a date range. An actual plan might show:
+
+```text
+Nested Loop                         actual rows=200
+  Index Scan on customers           actual rows=200
+  Seq Scan on orders               actual rows=1, loops=200
+```
+
+Read the leaves upward: the orders scan is repeated for each customer, so inspect `loops` and rows examined, not just the small output. If estimates predicted one customer but 200 arrived, investigate statistics and selectivity; compare a composite index such as `(customer_id, created_at)` and alternative join plans with realistic data. A scan can still be cheaper for a small table or a broad range; validate with actual timings and I/O rather than demanding an index seek. In PostgreSQL actual rows are reported per loop, so interpret them together with the loop count.
 
 ## 7. Procedural SQL: cursors, procedures vs functions, packages, triggers
 
@@ -185,3 +205,14 @@ WHERE d.department_id IS NULL;   -- employees with no matching department
 SELECT * FROM employee
 WHERE date_of_birth BETWEEN DATE '1980-01-01' AND DATE '2000-12-31';
 ```
+
+**Counts by gender within a birth-date range:** filter rows before grouping; use a half-open range so the entire last day is included even if the column is a timestamp:
+```sql
+SELECT gender, COUNT(*) AS headcount
+FROM employee
+WHERE date_of_birth >= DATE '1980-01-01'
+  AND date_of_birth < DATE '2001-01-01'
+GROUP BY gender;
+```
+
+The anti-join above finds *unmatched departments*, including a null foreign key; it does not mean “find every nullable department column.” If the requirement is specifically a missing foreign-key value, use `WHERE e.department_id IS NULL`; test a non-nullable right-side key for an anti-join.

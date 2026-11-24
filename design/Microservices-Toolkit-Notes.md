@@ -119,12 +119,16 @@ Related: [Architecture-Notes.md](Architecture-Notes.md), [Design-Patterns-Princi
 
 **Interview follow-up:** *"Your mobile app and your web app both call the same ten backend services, but need the data shaped differently — gateway, or BFF?"* → BFF. A single aggregating gateway serving both forces it to either return a lowest-common-denominator shape (wasting mobile bandwidth/battery) or grow conditional logic per client type (turning the gateway into a shared bottleneck both frontend teams have to coordinate changes through). One BFF per frontend lets each frontend team own its own aggregation shape independently.
 
+**Ownership trade-off:** if a central gateway team must approve every client-specific aggregation, frontend teams wait on a shared release and the gateway accumulates client branches. A team-owned BFF removes that coordination bottleneck but adds a deployable, operational ownership and potentially duplicated aggregation. With only one web client and modest aggregation, a single gateway or frontend-owned backend may be enough; separate BFFs are not mandatory merely because services exist.
+
 ## 3. Resilience Patterns
 
 **The three components of resilience (a framing device to lead with):**
 - **Robustness** — the ability to resist failure in the first place (redundancy, input validation, capacity headroom).
 - **Rebound** — the ability to recover quickly once failure happens (fast restarts, automated failover, retries).
 - **Degrading functionality (graceful degradation)** — the ability to keep serving a *reduced* but still useful experience when a dependency fails, instead of failing the whole request (e.g., show cached recommendations if the personalization service is down, rather than failing the whole page).
+
+**Business-priority decision:** if recommendations fail, hide them and keep the catalog available; if inventory is unavailable, accepting an order may oversell. Show last-known stock with its age only if the product accepts that risk, or accept a clearly pending request and validate before confirmation. Payment and inventory correctness must not be silently bypassed just to make the page appear available.
 
 **Stability patterns:**
 
@@ -139,7 +143,11 @@ Related: [Architecture-Notes.md](Architecture-Notes.md), [Design-Patterns-Princi
 
 **Isolation & redundancy:** isolate failure domains (separate instances/regions/AZs) so a failure in one blast radius doesn't propagate; add redundancy (multiple instances, multi-region) so a single failure doesn't remove capacity entirely — these two together are what actually makes Bulkheads and Circuit Breakers effective rather than just theoretical.
 
-**Middleware / guaranteed delivery + idempotency:** reliable messaging middleware (brokers with at-least-once delivery, acks, DLQs) guarantees a message *will* be delivered (possibly more than once) — it's on the consumer to be **idempotent** (see [Design-Patterns-Principles-Notes.md § 9](Design-Patterns-Principles-Notes.md#9-event-ordering--idempotency-idempotent-receiver-pattern)) so "delivered more than once" doesn't corrupt state. These two concerns — guaranteed delivery and idempotency — are always a pair; implementing one without the other leaves a gap.
+**A timeout budget is shared:** with three 500 ms attempts and two 1 s waits, the retry policy alone can consume 3.5 s before network/processing overhead. A 2 s caller deadline cannot accommodate it; propagate a remaining deadline, cap attempts and backoff with jitter, and leave time to respond. Retry only when the failure and operation justify it: a timeout after a payment request is ambiguous, so use an idempotency key and check outcome rather than blindly charging again; a validation failure generally won't improve on retry.
+
+**Bulkhead scenario:** slow promotions calls occupy a shared request/connection pool, so payment calls queue and time out even though the payment service is healthy. Give dependencies bounded, separately sized concurrency and queues, then reject or degrade promotions when its allocation fills. Monitor saturation and account for unused capacity across pools.
+
+**Delivery + idempotency:** at-least-once processing is an end-to-end design, not an unconditional broker guarantee: publication must be durable and confirmed, broker retention and acknowledgments configured correctly, and failures monitored and handled. Redelivery can create duplicates; an idempotent consumer prevents duplicate effects, but cannot repair a lost publication, expired message, poison message, or indefinitely unavailable dependency. See [event ordering and idempotency](Design-Patterns-Principles-Notes.md#10-event-ordering--idempotency-idempotent-receiver-pattern).
 
 **Spreading risk:** deliberately distribute load/traffic/data across independent units (shards, cells, regions) so that a failure or a bad deploy affects only a fraction of total traffic/users rather than everyone at once — this is the reasoning behind canary deploys, cell-based architecture, and sharding all at once.
 
@@ -160,6 +168,10 @@ Related: [Architecture-Notes.md](Architecture-Notes.md), [Design-Patterns-Princi
 3. **Data partitioning (sharding)** — split data across multiple stores/instances by some key, so each shard handles a fraction of total load. The caveat the notes flag explicitly: **queries that need to span shards** (cross-shard joins/aggregations) become expensive or require a separate aggregation layer — sharding is a trade that helps single-shard-key queries a lot and multi-shard queries a lot less (or not at all).
 4. **Functional decomposition** — split by *capability* rather than by duplicating/partitioning the same thing — this is, at root, the same move as microservice decomposition (§1), viewed through a scaling lens.
 
+**Partition-key follow-up:** a tenant key makes tenant-local queries cheap and isolates a failed shard's impact to its tenants, but one very large tenant can create a hot partition. A higher-cardinality key may distribute writes better while making tenant-wide queries fan out. Evaluate key distribution, growth, routing and cross-partition reads; test skew and decide what callers see when one shard is unavailable.
+
+**Failure example:** with four evenly loaded shards and no usable replica, one unavailable shard affects roughly its own quarter of key-routed requests, not necessarily every request. Real keys and traffic may be skewed, and a cross-shard report may fail or return a clearly marked partial result. Replicas and tested failover reduce the outage, but replication lag and promotion policy determine whether recent writes survive.
+
 **Code optimization** — the cheapest axis that isn't really an "axis": profile and fix hot paths before reaching for infrastructure scaling; it's easy to over-invest in horizontal scaling to compensate for an N+1 query or an unindexed lookup that a 20-minute fix would solve directly.
 
 **Load balancing:** distribute requests across instances (round-robin, least-connections, latency-aware) — the thing that makes horizontal duplication actually work; see the Distributed Systems vs. Sticky Sessions note in [Architecture-Notes.md § 7](Architecture-Notes.md#7-a-couple-of-smaller-architecture-decision-notes) for why sticky sessions undermine this.
@@ -171,7 +183,7 @@ Related: [Architecture-Notes.md](Architecture-Notes.md), [Design-Patterns-Princi
 **Caching — condensed, microservices-specific angle only** (full cache-strategy mechanics — cache-aside, read-through, write-through, write-behind, write-around, eviction policies — are covered in depth in [Caching-Notes.md](../data/Caching-Notes.md); not re-explained here):
 - **Where to place the cache relative to service boundaries** is itself a design decision: a cache *inside* one service's boundary (private cache) avoids coupling other services to its invalidation logic; a *shared* distributed cache (e.g., one Redis cluster used by several services) is cheaper to run but reintroduces the "shared dependency" common-coupling risk (§1) if two services cache overlapping data without a shared invalidation contract.
 - **Conditional GETs / ETags** pair naturally with a distributed cache at the HTTP layer — a client/gateway can avoid re-fetching a payload that hasn't changed, cutting both latency and cross-service load, without needing application-level cache logic in every consumer.
-- **Event-based invalidation across distributed caches** — when the source of truth changes, publish an invalidation event (rather than relying purely on TTL expiry) so every service's local cache (or cache region) can evict the stale entry promptly; Redis Keyspace Notifications are one concrete mechanism for this.
+- **Event-based invalidation across distributed caches** — publish an invalidation event when the source changes so local copies can evict promptly. Redis keyspace notifications are fire-and-forget Pub/Sub: disconnected subscribers miss events. Combine them with bounded TTL and reconciliation, or use a durable event stream when missed invalidation is unacceptable; also handle races between a read filling the cache and an update.
 - **Distributed Cache vs. Database latency, roughly:** an in-memory distributed cache hit is typically sub-millisecond to low-single-digit milliseconds; a database round trip (even a fast indexed query) is usually several milliseconds to tens of milliseconds once network + query execution + connection-pool wait are accounted for — the order-of-magnitude gap is the entire reason caching exists as a scalability lever, not just a latency nicety.
 
 **Interview follow-up:** *"Your service is read-heavy and you've added a distributed cache in front of the DB — load testing still shows the DB as the bottleneck. What do you check?"* → Cache hit ratio first — a cache with a low hit ratio (wrong key design, TTL too short relative to access pattern, or a very long tail of unique keys) still forces most traffic to the DB regardless of the cache's existence. Second, check for **cache stampede** on expiry (many requests missing simultaneously for a hot key right after it expires, all hitting the DB at once) — mitigated with request coalescing or staggered/jittered TTLs. Only after ruling those out would sharding the DB (axis 3 above) be the next lever.
@@ -191,7 +203,15 @@ Related: [Architecture-Notes.md](Architecture-Notes.md), [Design-Patterns-Princi
 
 **Recovery direction:**
 - **Backward recovery** — undo completed steps via compensating transactions when a later step fails (the typical Saga failure path).
-- **Forward recovery** — instead of undoing, retry the failed step forward until it succeeds (only viable when the step is guaranteed to eventually succeed, e.g., a transient infrastructure blip rather than a genuine business rejection).
+- **Forward recovery** — retry or otherwise resolve a failed step without undoing completed work. Transient errors may clear, but success is not guaranteed: use bounded retries, alerting and manual reconciliation where necessary; a business rejection may require compensation or another business path.
+
+**Saga pivot:** reserve inventory and authorize payment are compensatable; after an irreversible dispatch, undoing the shipment may not be practical. Treat that point as the pivot, and make later steps (such as sending confirmation) retryable and idempotent, with operational escalation if retries fail. The pivot is a business boundary, not necessarily the first step to fail.
+
+**Transactional outbox:** write the business change and an outbox record in the same local transaction; a relay publishes the record later. This closes the local database/publication atomicity gap, not every failure: relay retries can duplicate events, so consumers need idempotency, and operators need lag monitoring and reconciliation.
+
+**Cross-service reporting:** a dashboard joining orders, payments and customers via synchronous fan-out is fresh only to each response's observation time, slow when the slowest service is slow, and vulnerable to partial failures. A reporting projection fed by owned service events supports fast joins without exposing service databases, but is eventually consistent: expose freshness/lag, replay and reconcile missing or duplicate events, and evolve event schemas with consumers. Use direct calls when freshness and small bounded queries justify the availability and latency cost.
+
+**Contract evolution:** adding an optional field can be structurally compatible yet semantically breaking if clients interpret a changed meaning or an unexpected enum value incorrectly. Agree on consumer tolerance, test old and new consumers, and run versions concurrently during a migration with telemetry and a retirement date; changing a URL version alone doesn't make a semantic change safe.
 
 **Correlation ID:** a single ID generated at the start of a saga/flow and threaded through every message/event in it, so logs/traces across every participating service can be joined back into one end-to-end view — without this, debugging a failed saga across five services is close to impossible (see § 7 Observability for the broader distributed-tracing version of this idea).
 

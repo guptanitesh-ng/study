@@ -409,6 +409,8 @@ If the method can propagate `InterruptedException`, usually propagate it. If an 
 
 Deadlock: thread A holds lock 1 and waits for lock 2 while thread B holds lock 2 and waits for lock 1. Prevent with consistent lock ordering, smaller lock scope and avoiding external calls while holding locks; timed `tryLock` can support a deliberate failure/retry policy.
 
+**Production symptom:** if enough request workers deadlock or wait behind them, the request queue grows, the pool saturates and callers time out; retries can add more load and spread the incident upstream. Check thread dumps and pool/queue metrics together, stop retry amplification and isolate the dependency, then remove the lock-order cycle. Increasing the pool alone delays saturation rather than fixing the cause.
+
 Starvation: a thread cannot obtain needed progress/resources — for example, a low-priority thread is perpetually passed over, or a fairness-unaware lock keeps favoring the same threads. Livelock: threads keep taking actions but make no useful progress, such as two threads each repeatedly backing off and retrying at the same moment, forever colliding. Sleep-based guesses are not a proof of correctness.
 
 ### Detecting deadlock with `ThreadMXBean`
@@ -934,6 +936,12 @@ Honest answer: of these five, **`Semaphore`** is the one with a clear, common re
 - **`CyclicBarrier`**: rarer in production web/enterprise code than `CountDownLatch`. The realistic uses are (a) deliberately synchronizing N test threads to hit a race window at the same instant when writing a concurrency test, or (b) phase-based batch jobs where every worker must finish phase N (e.g. extract) before any worker starts phase N+1 (e.g. transform) — and even then, most teams model phases as separate stages/jobs rather than an in-process barrier.
 - **`Phaser`**: generalizes `CyclicBarrier`/`CountDownLatch` with a dynamically-changing party count and reusable phases, but most real systems don't need that flexibility. This is more of a "know it exists and what problem it solves" interview answer than something you'll reach for in day-to-day code.
 - **`Exchanger`**: niche. The textbook use is double-buffering — one thread fills a buffer while another drains the previously-filled one, swapping on each round — seen occasionally in data-pipeline/producer-consumer designs, but most teams use a `BlockingQueue` instead since it isn't restricted to exactly two threads and handles backpressure more naturally.
+
+### Testing concurrency: safety versus progress
+
+**Scenario:** two requests reserve the last seat. A passing single-threaded test says nothing about the collision. Use a latch or barrier to bring workers to a controlled starting point, run both operations, and assert the **safety** invariant: at most one reservation commits and the persisted state remains valid. A start gate increases contention; it does not force both threads through the same internal read/write interleaving. When that interleaving matters, use a controlled test seam at the relevant point, without adding synchronization that accidentally eliminates the race.
+
+Check **liveness** separately: wait for all tasks with a bounded timeout, propagate worker exceptions to the test, and always release gates and shut down the executor in cleanup. A timeout is a diagnostic failure, not proof of deadlock; inspect thread dumps and distinguish an overloaded test environment from a real lack of progress. Avoid `sleep()` as an ordering mechanism. Repeat a stress test across schedules and use a tool such as OpenJDK `jcstress` for Java Memory Model outcomes; passing finite runs does not prove all interleavings safe.
 
 ## 15. The fork/join framework
 
