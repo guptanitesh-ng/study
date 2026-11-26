@@ -30,6 +30,8 @@ Commit the updated `notes-manifest.json` with the note changes. The Pages workfl
 
 The generator excludes hidden folders, tooling folders, `.github`, `vendor`, and common project documents such as `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `CHANGELOG.md`. Update the exclusion sets in `scripts/build_site.py` if another Markdown support document should not appear in the library.
 
+The library groups notes by their top-level folder. Search matches note titles and category names; notes at the repository root appear under Other.
+
 ## Offline behavior
 
 The service worker precaches the reader and every note listed in the generated manifest. When online, opened resources are refreshed in the cache. If a note was added after the last visit, connect once and reload or open it before relying on offline access.

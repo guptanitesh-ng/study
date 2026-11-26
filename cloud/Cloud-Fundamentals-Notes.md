@@ -125,6 +125,48 @@ A reasonable baseline to state in an interview: HPA for synchronous API pods, KE
 
 **Helm's actual job:** renders chart templates into plain Kubernetes YAML and submits it to the API server — it is a packaging/templating tool, not a second control plane. It does not create the AKS cluster itself (that's Bicep/Terraform/ARM/`az aks create`); it deploys *into* an already-provisioned cluster.
 
+### Incoming HTTPS: gateway, ingress and pods
+
+**Example 1 — Application Gateway with AGIC:**
+
+```text
+Request path:
+Client ── HTTPS /orders ──> Application Gateway + WAF ──> ready order pod
+                            L7 routing / balancing         in AKS
+
+Configuration path:
+Helm ──> Kubernetes Ingress ──> Order Service
+                  │                   │ selects order pods
+                  └──> AGIC watches configuration and endpoints
+                            └──> programs Application Gateway
+```
+
+Application Gateway is the **data plane**: it handles HTTP traffic, applies configured WAF rules and chooses a healthy backend. **AGIC (Application Gateway Ingress Controller)** is the **controller**: it translates Kubernetes configuration into gateway settings; requests do **not** pass through AGIC. With AGIC, the gateway can route directly to pod IPs, not necessarily through the Service virtual IP. An Ingress describes host/path rules and references a Service; a Service identifies pods and can also provide a stable cluster address and distribute connections when traffic uses it. Gateway health probes and Kubernetes readiness must both be configured correctly.
+
+The gateway is a separate Azure resource, usually provisioned through Bicep or Terraform. Helm typically deploys the app's Service and Ingress; AGIC may be installed with Helm or as an AKS add-on. The chart does not need to create the gateway itself. A WAF in **Detection** mode logs matches; **Prevention** mode can block them. Check the actual environment rather than assuming either mode.
+
+**Example 2 — a proxy ingress controller running in AKS:**
+
+```text
+Client ──> Azure Load Balancer ──> ingress proxy replicas ──> Order Service ──> order pod
+                 L4                   L7 HTTP routing            cluster routing
+```
+
+This is an alternative topology, not a mandatory extra hop in example 1. Azure Load Balancer distributes TCP/UDP connections to proxy replicas; the proxy routes by host or path. The Service's networking layer can distribute connections to ready pods; depending on the controller, the proxy may instead route directly to pod endpoints. Balancing across proxy replicas and across app pods are **different jobs**, not necessarily two separate Azure Load Balancer resources.
+
+| Component | Primary role / decision |
+|---|---|
+| **Azure Load Balancer** | Layer 4: distributes TCP/UDP connections; doesn't route based on HTTP paths. |
+| **Application Gateway** | Layer 7: HTTP routing and balancing, TLS termination and optional WAF. Azure operates the gateway; the team still owns its configuration. |
+| **API gateway / Azure API Management (APIM)** | Separate from Application Gateway. Applies API policies such as token validation, per-client limits and API versions; APIM can also provide subscriptions and a developer portal. |
+| **In-cluster ingress proxy** | HTTP routing inside AKS. Choose for its specific capabilities or portability, accounting for proxy scaling, upgrades and operations; WAF and API policies may be provided elsewhere. |
+
+These roles can overlap. APIM is optional: for example, `Client → Application Gateway + WAF → APIM → AKS backend` puts WAF inspection before APIM; ensure clients cannot bypass the intended enforcement layer. The backend may use an ingress proxy or another supported route, depending on network design. A gateway or proxy's replicas also need load distribution, but a managed gateway may handle this internally.
+
+**Interview follow-ups:** A Kubernetes Service usually balances at L4, not by HTTP path; an ingress or gateway provides L7 routing. A rate limiter is often a configured gateway policy, not custom application code, but check whether limits are per replica or shared and whether the product exposes an algorithm choice. APIM and WAF are not automatically provided by AKS. Choose managed Application Gateway + AGIC for Azure-integrated routing/WAF, or an in-cluster proxy when its features and operational trade-offs fit; neither is mandatory for every application.
+
+**Troubleshooting:** If the Ingress exists but traffic fails, check AGIC reconciliation and permissions, gateway listener/rule and backend health probes, then Service selectors, pod readiness and network reachability. If the gateway has no healthy backends, adding more application replicas alone will not fix a wrong probe path or port.
+
 **Managed Kubernetes/PaaS comparison:**
 
 | Platform | What it manages for you | Positioning |
@@ -291,4 +333,4 @@ Kubernetes doesn't restart pods automatically when a ConfigMap changes (not even
 
 ### 8.16 What's the difference between a `Deployment`, a `Service`, and an `Ingress` — and where does an Azure Application Gateway or AGIC fit in?
 
-A **Deployment** manages pod replicas and rollout strategy. A **Service** gives those (ephemeral, IP-changing) pods a stable virtual IP/DNS name and load-balances across whichever pods currently match its label selector — internal-only by default (`ClusterIP`), or externally reachable via `LoadBalancer`/`NodePort`. An **Ingress** is a layer-7 (HTTP/HTTPS) routing rule set — host/path-based routing, TLS termination — that needs an **Ingress Controller** actually running in the cluster to do anything; AGIC (Application Gateway Ingress Controller) is Azure's option that uses an Application Gateway as that controller, versus the more common NGINX ingress controller which is just another set of pods in the cluster. The senior-level distinction to have ready: a `Service` alone can expose one app externally with its own IP, but Ingress is what lets many services share one external IP/load balancer with host/path-based routing — without it, every externally-facing Service needs its own cloud load balancer, which gets expensive and unwieldy past a handful of services.
+A **Deployment** manages pod replicas and rollouts. A **Service** provides a stable address and selects backend pods; an **Ingress** declares HTTP host/path routing to Services and needs a compatible controller to implement it. With **AGIC**, the controller configures Application Gateway, which handles requests; an in-cluster proxy controller can instead handle the requests itself. Ingress lets multiple services share an HTTP entry point, but it is not the only way to do so: an external gateway or Gateway API implementation can also provide routing. See the diagrams in §5.

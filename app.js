@@ -28,6 +28,7 @@
   let notes = [];
   let currentIndex = -1;
   let headings = [];
+  const categoryState = new Map();
   let saveTimer;
   let restoring = false;
 
@@ -65,24 +66,57 @@
   function renderLibrary(filter = "") {
     const query = filter.trim().toLowerCase();
     elements.noteList.replaceChildren();
+    const categories = new Map();
     notes.forEach((note, index) => {
-      if (query && !note.title.toLowerCase().includes(query)) {
+      const parts = note.path.split("/");
+      const category = parts.length > 1 ? parts[0] : "other";
+      const label = category.toLowerCase() === "dsa"
+        ? "DSA"
+        : category.charAt(0).toUpperCase() + category.slice(1);
+      if (query && !note.title.toLowerCase().includes(query) && !label.toLowerCase().includes(query)) {
         return;
       }
-      const link = document.createElement("a");
-      link.href = `?note=${encodeURIComponent(note.path)}`;
-      link.textContent = note.title;
-      link.dataset.index = String(index);
-      if (index === currentIndex) {
-        link.setAttribute("aria-current", "page");
+      if (!categories.has(category)) {
+        categories.set(category, { label, items: [] });
       }
-      link.addEventListener("click", event => {
-        event.preventDefault();
-        openNote(index, true);
-        closePanels();
-      });
-      elements.noteList.append(link);
+      categories.get(category).items.push({ note, index });
     });
+
+    [...categories.entries()].sort((a, b) => a[1].label.localeCompare(b[1].label)).forEach(([category, group]) => {
+      const section = document.createElement("details");
+      section.className = "library-category";
+      section.open = Boolean(query) || (categoryState.get(category) ?? group.items.some(item => item.index === currentIndex));
+      section.addEventListener("toggle", () => {
+        if (section.isConnected && !elements.search.value.trim()) {
+          categoryState.set(category, section.open);
+        }
+      });
+      const heading = document.createElement("summary");
+      heading.textContent = `${group.label} (${group.items.length})`;
+      section.append(heading);
+      group.items.forEach(({ note, index }) => {
+        const link = document.createElement("a");
+        link.href = `?note=${encodeURIComponent(note.path)}`;
+        link.textContent = note.title;
+        link.dataset.index = String(index);
+        if (index === currentIndex) {
+          link.setAttribute("aria-current", "page");
+        }
+        link.addEventListener("click", event => {
+          event.preventDefault();
+          openNote(index, true);
+          closePanels();
+        });
+        section.append(link);
+      });
+      elements.noteList.append(section);
+    });
+    if (!categories.size) {
+      const empty = document.createElement("p");
+      empty.className = "status-text";
+      empty.textContent = "No matching notes.";
+      elements.noteList.append(empty);
+    }
   }
 
   function assignHeadingIds() {

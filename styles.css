@@ -194,6 +194,23 @@ button {
   color: var(--text);
 }
 
+.library-category {
+  margin-bottom: 0.4rem;
+}
+
+.library-category summary {
+  border-radius: 0.4rem;
+  padding: 0.6rem 0.7rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.library-category summary:hover {
+  background: var(--surface-muted);
+}
+
 #note-list a,
 #outline-list a {
   display: block;
@@ -204,7 +221,7 @@ button {
 
 #note-list a {
   margin-bottom: 0.25rem;
-  padding: 0.65rem 0.7rem;
+  padding: 0.65rem 0.7rem 0.65rem 1.5rem;
   line-height: 1.3;
 }
 
